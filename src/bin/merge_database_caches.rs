@@ -1,16 +1,29 @@
-use std::{collections::HashMap, fs::OpenOptions, io::Write};
+use std::{fs::OpenOptions, io::Write};
 
+use clap::Parser;
 use lvv::cache::cache_embeddings::Cache;
 fn main() {
-    let mut cache_1 = Cache::from_json_file("database_old.json").unwrap();
-    let mut cache_2 = Cache::from_json_file("database.json").unwrap();
-    cache_1.cache.extend(cache_2.cache);
-    let st = serde_json::to_string(&cache_1).unwrap();
-    let mut dump_file = OpenOptions::new()
+    let eve = LvvExtendCache::parse();
+    println!("{eve:?}");
+    let mut file_base =
+        Cache::from_json_file(eve.base.as_str()).expect("No se encontro archivo base");
+    eve.others
+        .into_iter()
+        .map(|file| Cache::from_json_file(&file).unwrap())
+        .for_each(|cache| file_base.cache.extend(cache.cache));
+    let mut file = OpenOptions::new()
         .create(true)
-        .write(true)
         .truncate(true)
-        .open("database_joined.json")
+        .write(true)
+        .open("database_joined_2.json")
         .unwrap();
-    dump_file.write_all(st.as_bytes()).unwrap();
+
+    let st = serde_json::to_string(&file_base).unwrap();
+    file.write_all(st.as_bytes()).unwrap();
+}
+
+#[derive(Debug, Parser)]
+pub struct LvvExtendCache {
+    pub base: String,
+    pub others: Vec<String>,
 }

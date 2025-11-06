@@ -35,7 +35,7 @@ impl JobBuilder {
         let limitaciones = "Por limitaciones del escritor de esta libreria, collection_name es la ultima instruccion que se debe usar en el constructor";
         let provider = match self.provider.clone().expect(limitaciones) {
             Provider::Ollama(model) => format!("ollama_{}", escapechars(model)),
-            Provider::OpenAI(model) => format!("ollama_{}", escapechars(model)),
+            Provider::OpenAI(model) => format!("openai_{}", escapechars(model)),
         };
         let distance = match self.distance.expect(limitaciones) {
             Distance::Cosine => "Cosine",
@@ -84,17 +84,4 @@ impl Job {
             })
             .collect()
     }
-
-    // pub fn get_string(&self) -> Vec<String> {
-    //     match self.to_owned().dataset {
-    //         DataSet::Nico(data) => data
-    //             .into_iter()
-    //             .map(|prop| serde_json::to_string(&prop).unwrap())
-    //             .collect(),
-    //         DataSet::Taca(data) => data
-    //             .into_iter()
-    //             .map(|prop| serde_json::to_string(&prop).unwrap())
-    //             .collect(),
-    //     }
-    // }
 }

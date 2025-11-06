@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::Display,
     fs::{OpenOptions, read_to_string},
     hash::{DefaultHasher, Hash, Hasher},
     io::Write,
@@ -11,6 +12,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Cache {
     pub cache: HashMap<u64, Vec<Vec<f32>>>,
+}
+impl Display for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Cache with {} entries", self.cache.len())
+    }
 }
 
 impl Cache {
@@ -48,11 +54,12 @@ impl Cache {
             .create(true)
             .write(true)
             .truncate(true)
-            .open("database.json")
+            .open(file_name)
             .context("Couldnt't open dump file")?;
         let string = serde_json::to_string(self).context("Error serializando")?;
         file.write_all(string.as_bytes())
             .context("Error escribiendo archivo")?;
+        println!("Cache written to {file_name}");
         Ok(())
     }
 }

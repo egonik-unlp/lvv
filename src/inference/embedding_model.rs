@@ -26,27 +26,13 @@ impl EmbeddingProvider {
     }
     pub async fn embed_properties(&self, dataset: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         let mut embeddings = vec![];
-
         let mut failed_ids = vec![];
-        let mut log_emb = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open("logs_taca_full.log")
-            .context("Failed creating log file")?;
-        for (n, chunk) in dataset.chunks(50).enumerate() {
-            println!("Embedding chunk n = {}", n);
+        for (n, chunk) in dataset.chunks(50).enumerate().progress() {
             let properties_string_chunk = chunk.to_vec();
             let embeddings_chunk = self.model.embed(properties_string_chunk.clone()).await;
             match embeddings_chunk {
                 Ok(emb) => embeddings.extend(emb),
-                Err(err) => {
-                    failed_ids.push(n);
-                    println!("Error con chunk = {}\n{}", n, err);
-                    properties_string_chunk
-                        .iter()
-                        .map(|word| format!("{word},\n"))
-                        .for_each(|word| log_emb.write_all(word.as_bytes()).unwrap());
-                }
+                Err(_) => failed_ids.push(n),
             }
         }
         println!(
@@ -56,12 +42,9 @@ impl EmbeddingProvider {
         Ok(embeddings)
     }
 }
-use crate::intake::dataset::DataSet;
 use anyhow::Context;
+use indicatif::ProgressIterator;
 use llm::{
     LLMProvider,
     builder::{LLMBackend, LLMBuilder},
 };
-use std::io::Write;
-use std::{fs::OpenOptions, time::Duration};
-use tokio::time::sleep;

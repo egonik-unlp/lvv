@@ -1,7 +1,6 @@
 #![allow(clippy::result_large_err)]
-use std::env::VarError;
+use std::{env::VarError, fmt::Debug};
 
-// const COLLECTION_NAME: &str = "embeddinggemma_1";
 use qdrant_client::{
     Payload, Qdrant, QdrantError,
     qdrant::{
@@ -63,6 +62,15 @@ pub struct ConnectedDB {
     pub params: DatabaseParams,
     pub client: Qdrant,
 }
+impl Debug for ConnectedDB {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "ConnectedDB{{\n\tparams: {:?}\n\tclient: QdrantClient\n}}",
+            self.params
+        )
+    }
+}
 impl ConnectedDB {
     pub async fn collection_exists_and_is_not_empty(
         &self,
@@ -75,8 +83,7 @@ impl ConnectedDB {
             .await
             .unwrap()
         {
-            if self
-                .client
+            self.client
                 .collection_info(collection_name)
                 .await
                 .unwrap()
@@ -86,11 +93,6 @@ impl ConnectedDB {
                 .unwrap()
                 > 0
                 && !extend
-            {
-                true
-            } else {
-                false
-            }
         } else {
             false
         }
@@ -131,6 +133,7 @@ impl ConnectedDB {
             let point = PointStruct::new(uuid, embedding, payload);
             points.push(point);
         }
+        println!("Array of points pre upload = {}", points.len());
         self.client
             .upsert_points(UpsertPointsBuilder::new(collection_name, points))
             .await
@@ -138,7 +141,7 @@ impl ConnectedDB {
         Ok(())
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum QdrantDatabase {
     Disconnected(DatabaseParams),
     Connected(ConnectedDB),
