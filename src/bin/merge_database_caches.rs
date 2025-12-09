@@ -5,6 +5,7 @@ use lvv::cache::cache_embeddings::Cache;
 fn main() {
     let eve = LvvExtendCache::parse();
     println!("{eve:?}");
+    let filename = eve.filename.unwrap_or("joined_cache.json".to_owned());
     let mut file_base =
         Cache::from_json_file(eve.base.as_str()).expect("No se encontro archivo base");
     eve.others
@@ -15,7 +16,7 @@ fn main() {
         .create(true)
         .truncate(true)
         .write(true)
-        .open("database_joined_2.json")
+        .open(filename)
         .unwrap();
 
     let st = serde_json::to_string(&file_base).unwrap();
@@ -26,4 +27,5 @@ fn main() {
 pub struct LvvExtendCache {
     pub base: String,
     pub others: Vec<String>,
+    pub filename: Option<String>,
 }

@@ -1,3 +1,13 @@
+// TODO: reemplazar anyhow con thiserror
+use anyhow::Context;
+use indicatif::ProgressIterator;
+use llm::{
+    LLMProvider,
+    builder::{LLMBackend, LLMBuilder},
+};
+use serde::Serialize;
+
+use crate::intake::dataset::DataSet;
 pub struct EmbeddingProvider {
     pub model: Box<dyn LLMProvider>,
 }
@@ -24,12 +34,26 @@ impl EmbeddingProvider {
             .context("Error creando modelo embdding")?;
         Ok(EmbeddingProvider { model: llm })
     }
-    pub async fn embed_properties(&self, dataset: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+    pub async fn embed_properties<T>(&self, dataset: DataSet<T>) -> anyhow::Result<Vec<Vec<f32>>>
+    where
+        T: Serialize + Clone,
+    {
         let mut embeddings = vec![];
         let mut failed_ids = vec![];
-        for (n, chunk) in dataset.chunks(50).enumerate().progress() {
-            let properties_string_chunk = chunk.to_vec();
+        for (n, chunk) in dataset
+            .data
+            .context("There is no data to embed")?
+            .chunks(50)
+            .enumerate()
+            .progress()
+        {
+            let properties_string_chunk: Vec<_> = chunk
+                .iter()
+                .map(|article| serde_json::to_string(article).expect("Couldn't serialize article"))
+                .collect();
+
             let embeddings_chunk = self.model.embed(properties_string_chunk.clone()).await;
+            println!("{:?}", embeddings_chunk);
             match embeddings_chunk {
                 Ok(emb) => embeddings.extend(emb),
                 Err(_) => failed_ids.push(n),
@@ -42,9 +66,3 @@ impl EmbeddingProvider {
         Ok(embeddings)
     }
 }
-use anyhow::Context;
-use indicatif::ProgressIterator;
-use llm::{
-    LLMProvider,
-    builder::{LLMBackend, LLMBuilder},
-};
