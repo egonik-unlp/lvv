@@ -2,6 +2,9 @@
 name = "lvv"
 version = "0.2.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A pipeline for embedding datasets with LLMs (Ollama/OpenAI) and loading them into a Qdrant vector database, with caching and job queuing."
+repository = "https://github.com/egonik-unlp/lvv"
 
 [dependencies]
 anyhow = "1.0.100"

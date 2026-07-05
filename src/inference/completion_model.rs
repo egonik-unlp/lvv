@@ -12,7 +12,7 @@ use llm::{
     builder::{LLMBackend, LLMBuilder},
     chat::ChatMessage,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc;
 
 pub struct CompletionModel {
@@ -30,10 +30,12 @@ pub trait FieldsEnhanceable<T> {
     fn set_fields(&mut self, modifications: HashMap<String, Box<dyn FieldEnhanceableG<T>>>);
 }
 
+#[allow(dead_code)] // WIP: live-dumping wired into `perform_completion_and_live_dump`
 struct LiveDumpFile {
     file: File,
 }
 
+#[allow(dead_code)] // WIP: live-dumping wired into `perform_completion_and_live_dump`
 impl LiveDumpFile {
     fn create(filename: String) -> anyhow::Result<Self> {
         let file = OpenOptions::new()
@@ -49,7 +51,7 @@ impl LiveDumpFile {
             .context("Could not write while live dumping")?;
         Ok(file_dump)
     }
-    fn append_property<T, M, S>(&mut self, property: T, modifications: M) -> anyhow::Result<()>
+    fn append_property<T, M, S>(&mut self, property: T, _modifications: M) -> anyhow::Result<()>
     where
         T: Clone + Serialize,
     {
@@ -63,7 +65,7 @@ impl LiveDumpFile {
             .context("Could not write while live dumping")?;
         Ok(())
     }
-    fn close<T>(mut self, property: T) -> anyhow::Result<()>
+    fn close<T>(mut self, _property: T) -> anyhow::Result<()>
     where
         T: Clone + Serialize,
     {
@@ -105,7 +107,7 @@ impl CompletionModel {
     pub async fn perform_completion_and_live_dump<T>(
         &self,
         dataset: Vec<T>,
-        live_dump_file: Option<String>,
+        _live_dump_file: Option<String>,
     ) -> anyhow::Result<Vec<T>>
     where
         T: Serialize + Clone,
@@ -135,7 +137,7 @@ impl CompletionModel {
                 .progress_chars("#>-"),
         );
         let mut tokens = 0u32;
-        for (n, mut property) in dataset.into_iter().enumerate() {
+        for (n, property) in dataset.into_iter().enumerate() {
             if n == 1 {
                 println!("At least one iteration ran");
             }
