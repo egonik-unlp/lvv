@@ -151,6 +151,9 @@ impl QdrantDatabase {
         let params = DatabaseParams::new(location, collection, distance, dims);
         Self::Disconnected(params)
     }
+    pub fn new_with_database_params(params: DatabaseParams) -> Self {
+        Self::Disconnected(params)
+    }
     pub fn connect(self) -> VDBResult<Self> {
         if let QdrantDatabase::Disconnected(params) = self {
             let location = Location::new_local("http://localhost:6334");

@@ -34,35 +34,46 @@ impl EmbeddingProvider {
             .context("Error creando modelo embdding")?;
         Ok(EmbeddingProvider { model: llm })
     }
+    /// Embed every item in `dataset`, returning exactly one vector per item, in
+    /// order.
+    ///
+    /// Items are sent to the backend in batches for throughput. Some backends
+    /// (notably Ollama through `llm`) reject *multi-input* embedding requests
+    /// even though each single input succeeds; when a batch request fails we
+    /// transparently fall back to embedding that batch one item at a time. A
+    /// genuine embedding failure is returned as an error rather than silently
+    /// dropped — the previous behaviour skipped failed chunks, which left the
+    /// returned vector shorter than (and misaligned with) the dataset and its
+    /// payloads.
     pub async fn embed_properties<T>(&self, dataset: DataSet<T>) -> anyhow::Result<Vec<Vec<f32>>>
     where
         T: Serialize + Clone,
     {
-        let mut embeddings = vec![];
-        let mut failed_ids = vec![];
-        for (n, chunk) in dataset
-            .data
-            .context("There is no data to embed")?
-            .chunks(50)
-            .enumerate()
-            .progress()
-        {
-            let properties_string_chunk: Vec<_> = chunk
+        let data = dataset.data.context("There is no data to embed")?;
+        let mut embeddings = Vec::with_capacity(data.len());
+        for chunk in data.chunks(50).progress() {
+            let chunk_strings: Vec<String> = chunk
                 .iter()
-                .map(|article| serde_json::to_string(article).expect("Couldn't serialize article"))
-                .collect();
+                .map(|article| serde_json::to_string(article).context("Couldn't serialize article"))
+                .collect::<anyhow::Result<_>>()?;
 
-            let embeddings_chunk = self.model.embed(properties_string_chunk.clone()).await;
-            println!("{:?}", embeddings_chunk);
-            match embeddings_chunk {
+            match self.model.embed(chunk_strings.clone()).await {
                 Ok(emb) => embeddings.extend(emb),
-                Err(_) => failed_ids.push(n),
+                Err(batch_err) => {
+                    // Batch request failed (e.g. the Ollama backend can't send a
+                    // multi-input embed): retry the chunk one item per request.
+                    for (i, one) in chunk_strings.into_iter().enumerate() {
+                        let single = self.model.embed(vec![one]).await.map_err(|e| {
+                            anyhow::anyhow!(
+                                "embedding failed on item {i} of a per-item fallback \
+                                 (original batch error: {batch_err}): {e}"
+                            )
+                        })?;
+                        embeddings.extend(single);
+                    }
+                }
             }
         }
-        println!(
-            "Returning from embedding function. Failed chunk ids:\n{:#?}",
-            failed_ids
-        );
         Ok(embeddings)
     }
 }
