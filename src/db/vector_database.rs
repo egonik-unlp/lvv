@@ -76,33 +76,22 @@ impl ConnectedDB {
         &self,
         collection_name: &str,
         extend: bool,
-    ) -> bool {
-        if self
-            .client
-            .collection_exists(collection_name)
-            .await
-            .unwrap()
-        {
-            self.client
+    ) -> VDBResult<bool> {
+        if self.client.collection_exists(collection_name).await? {
+            let points = self
+                .client
                 .collection_info(collection_name)
-                .await
-                .unwrap()
+                .await?
                 .result
-                .unwrap()
-                .points_count
-                .unwrap()
-                > 0
-                && !extend
+                .and_then(|info| info.points_count)
+                .unwrap_or(0);
+            Ok(points > 0 && !extend)
         } else {
-            false
+            Ok(false)
         }
     }
     pub async fn get_collection(&self, collection_name: &str, dims: u64) -> VDBResult<()> {
-        let evaluates_to = !self
-            .client
-            .collection_exists(collection_name)
-            .await
-            .unwrap();
+        let evaluates_to = !self.client.collection_exists(collection_name).await?;
         println!("evaluates_to = {}", evaluates_to);
         if evaluates_to {
             let result = self
@@ -123,7 +112,7 @@ impl ConnectedDB {
         embeddings: Vec<Vec<f32>>,
         payloads: Vec<Payload>,
     ) -> VDBResult<()> {
-        self.get_collection(collection_name, dims).await.unwrap();
+        self.get_collection(collection_name, dims).await?;
         let mut points = vec![];
         for (embedding, payload) in embeddings.into_iter().zip(payloads) {
             let random_bytes = rand::rng().random();
@@ -136,8 +125,7 @@ impl ConnectedDB {
         println!("Array of points pre upload = {}", points.len());
         self.client
             .upsert_points(UpsertPointsBuilder::new(collection_name, points))
-            .await
-            .unwrap();
+            .await?;
         Ok(())
     }
 }
