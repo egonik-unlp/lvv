@@ -1,5 +1,5 @@
 // TODO: reemplazar anyhow con thiserror
-use std::{fs::OpenOptions, io::Write};
+use std::sync::Arc;
 
 use anyhow::Context;
 use indicatif::ProgressIterator;
@@ -7,7 +7,11 @@ use serde::Serialize;
 
 use crate::{
     cache::cache_embeddings::Cache,
-    db::{QdrantDatabase, vector_database::DatabaseParams},
+    db::{
+        QdrantDatabase,
+        sink::{QdrantSink, Sink, SinkContext},
+        vector_database::DatabaseParams,
+    },
     inference::embedding_model::EmbeddingProvider, // Needed for `run()` when creating embedders
     jobs::{Provider, job::Job},
 };
@@ -16,7 +20,13 @@ use crate::{
 pub struct JobQueue<T: Serialize + Clone> {
     queue: Vec<Job<T>>,
     cache: Option<Cache>,
+    /// Legacy single-Qdrant target (via [`JobQueue::with_database_params`]).
+    /// Kept for back-compat: at `run` time it is appended as a trailing
+    /// [`QdrantSink`].
     connection: Option<QdrantDatabase>,
+    /// Explicit sinks, written in registration order (e.g. Postgres, then
+    /// Qdrant). Prefer these over `connection` for multi-sink pipelines.
+    sinks: Vec<Arc<dyn Sink>>,
 }
 impl<T> JobQueue<T>
 where
@@ -28,15 +38,30 @@ where
             queue: vec,
             cache: None,
             connection: None,
+            sinks: Vec::new(),
         }
     }
     pub fn with_cache(&mut self, cache: Cache) -> &mut Self {
         self.cache = Some(cache);
         self
     }
+    /// Legacy: register a single Qdrant target. Equivalent to
+    /// `with_sink(Arc::new(QdrantSink::new(params)))`, kept for back-compat.
     pub fn with_database_params(&mut self, params: DatabaseParams) -> &mut Self {
         let database = QdrantDatabase::new_with_database_params(params);
         self.connection = Some(database);
+        self
+    }
+    /// Register a sink. Sinks run in registration order; for a dual write put
+    /// the authoritative store first (e.g. Postgres before Qdrant) so a partial
+    /// failure leaves the durable store written and the derived index behind.
+    pub fn with_sink(&mut self, sink: Arc<dyn Sink>) -> &mut Self {
+        self.sinks.push(sink);
+        self
+    }
+    /// Convenience for `with_sink(Arc::new(QdrantSink::new(params)))`.
+    pub fn with_qdrant_sink(&mut self, params: DatabaseParams) -> &mut Self {
+        self.sinks.push(Arc::new(QdrantSink::new(params)));
         self
     }
     pub fn build(&mut self) -> Self {
@@ -89,59 +114,57 @@ where
                     Ok(temp)
                 }
             }?;
-            let payloads = job.get_payloads()?;
-            if let Some(cache) = self.cache.clone() {
-                cache
-                    .to_json_file("database_joined2.json")
-                    .context("Couldn't save cache")?;
-                println!("Starting upload");
-                println!(
-                    "Just pre upload.\n{}\n{}\n{}\n{}",
-                    &job.collection_name,
-                    job.dims,
-                    embeddings.len(),
-                    payloads.len()
-                );
+            // Raw JSON rows, one per embedding; each sink derives its own
+            // representation from these (Qdrant -> Payload, Postgres -> jsonb).
+            let rows = job.get_payload_values()?;
+
+            // Assemble the sinks for this job: explicit sinks first (in
+            // registration order, e.g. Postgres), then the legacy `connection`
+            // Qdrant target appended for back-compat.
+            let mut sinks: Vec<Arc<dyn Sink>> = self.sinks.clone();
+            if let Some(connection) = self.connection.clone() {
+                let params = match connection {
+                    QdrantDatabase::Disconnected(params) => params,
+                    QdrantDatabase::Connected(db) => db.params,
+                };
+                sinks.push(Arc::new(QdrantSink::new(params)));
             }
 
-            let embeddings_string =
-                serde_json::to_string(&embeddings).context("Could not stringify embeddings")?;
-            let embedding_dump_file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open("embeddings_dump_changemyname.json");
-            match embedding_dump_file {
-                Ok(mut file) => file
-                    .write_all(embeddings_string.as_bytes())
-                    .context("Could not write to file")?,
-                Err(error) => println!("Dump file not created, err:\n{}", error),
-            }
-            if let Some(connection) = self.connection.clone() {
-                let db = connection
-                    .connect()
-                    .context("Could not connect to database")?;
-                if let QdrantDatabase::Connected(db) = db {
-                    if db
-                        .collection_exists_and_is_not_empty(&job.collection_name, job.extends)
-                        .await
-                    {
-                        println!("EXISTE Y NO SE TOCA");
-                        println!(
-                            "Done\nCollection Name: {}\nProvider: {:?}",
-                            job.collection_name, job.provider
-                        );
-                        continue;
-                    }
-                    db.upload_embedddings(&job.collection_name, job.dims, embeddings, payloads)
-                        .await
-                        .unwrap();
-                    println!(
-                        "Done\nCollection Name: {}\nProvider: {:?}",
-                        job.collection_name, job.provider
-                    );
+            let ctx = SinkContext {
+                collection_name: &job.collection_name,
+                dims: job.dims,
+                extends: job.extends,
+                embeddings: &embeddings,
+                rows: &rows,
+            };
+
+            // Write to each sink in order. On failure, report which sinks were
+            // already written and which were not, and abort the job — a re-run
+            // is idempotent (Postgres upserts by stable id; Qdrant skips a
+            // populated collection when `extends` is false) and reconciles.
+            let mut written: Vec<String> = Vec::new();
+            for sink in &sinks {
+                if let Err(e) = sink.write(&ctx).await {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "sink '{}' failed for collection '{}'. Written: [{}]; \
+                             not written: '{}' and any sink after it. Re-run to reconcile \
+                             (writes are idempotent).",
+                            sink.name(),
+                            job.collection_name,
+                            written.join(", "),
+                            sink.name(),
+                        )
+                    });
                 }
+                written.push(sink.name().to_string());
             }
+            println!(
+                "Done. Collection: {}  Provider: {:?}  Sinks: [{}]",
+                job.collection_name,
+                job.provider,
+                written.join(", ")
+            );
         }
         Ok(())
     }

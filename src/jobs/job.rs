@@ -92,4 +92,18 @@ impl<T: Serialize + Clone> Job<T> {
         }
         Ok(payloads)
     }
+
+    /// Same rows as [`Job::get_payloads`], but as raw JSON values. Sinks that
+    /// persist metadata (e.g. PostgreSQL) consume these; each sink turns them
+    /// into its own representation (Qdrant re-derives `Payload`, Postgres stores
+    /// them as `jsonb`).
+    pub fn get_payload_values(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut values = vec![];
+        for datum in self.dataset.data.clone().context("Couldn't acquire data")? {
+            values.push(
+                serde_json::to_value(datum).context("Could not create value from data")?,
+            );
+        }
+        Ok(values)
+    }
 }
