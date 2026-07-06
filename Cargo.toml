@@ -1,6 +1,6 @@
 [package]
 name = "lvv"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "A pipeline for embedding datasets with LLMs (Ollama/OpenAI) and loading them into a Qdrant vector database, with caching and job queuing."
@@ -39,8 +39,8 @@ toml = "0.9.8"
 indicatif = "0.18.2"
 uuid = "1.18.1"
 clap = { version = "4.5.51", features = ["derive"] }
-# Pinned < 0.40: rusqlite 0.40 pulls libsqlite3-sys 0.38 whose build script
+# Pinned to 0.37 (libsqlite3-sys 0.35): matches burn-dataset in downstream
 # uses the unstable `cfg_select!` macro (needs a newer rustc than 1.93).
-rusqlite = { version = "0.34", features = ["bundled"], optional = true }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 mysql_async = { version = "0.37.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
