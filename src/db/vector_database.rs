@@ -156,8 +156,14 @@ impl QdrantDatabase {
     }
     pub fn connect(self) -> VDBResult<Self> {
         if let QdrantDatabase::Disconnected(params) = self {
-            let location = Location::new_local("http://localhost:6334");
-            let client = Qdrant::from_url(location.get_url().as_str()).build()?;
+            // Honour the configured location so instances can be
+            // port-partitioned (e.g. one Qdrant per project on a distinct
+            // port). A remote location also carries its API key.
+            let mut builder = Qdrant::from_url(params.location.get_url().as_str());
+            if let Location::Remote { api_key, .. } = &params.location {
+                builder = builder.api_key(api_key.clone());
+            }
+            let client = builder.build()?;
             let connected_db = ConnectedDB { params, client };
             Ok(Self::Connected(connected_db))
         } else {
