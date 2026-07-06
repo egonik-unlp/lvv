@@ -68,6 +68,7 @@ impl Sink for QdrantSink {
             if db
                 .collection_exists_and_is_not_empty(ctx.collection_name, ctx.extends)
                 .await
+                .map_err(|e| anyhow::anyhow!("Qdrant collection check failed: {e}"))?
             {
                 // Already populated and not extending: leave it untouched.
                 return Ok(());
