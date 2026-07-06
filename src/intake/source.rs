@@ -266,6 +266,279 @@ mod postgres_source {
     }
 }
 
+#[cfg(feature = "sql")]
+pub use sql_source::{SqlEngine, SqlSource};
+
+#[cfg(feature = "sql")]
+mod sql_source {
+    use super::*;
+
+    /// SQL engine a [`SqlSource`] talks to. PostgreSQL has its own dedicated
+    /// [`PostgresSource`]; this covers the other engines.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SqlEngine {
+        /// MySQL/MariaDB via a `mysql://…` connection URL.
+        MySql,
+        /// SQLite via a file path (or `:memory:`).
+        Sqlite,
+    }
+
+    /// Reads rows from SQLite or MySQL via a query into `DataSet<Value>`, with
+    /// the same row→JSON-object mapping across engines.
+    #[derive(Debug, Clone)]
+    pub struct SqlSource {
+        engine: SqlEngine,
+        /// SQLite file path, or MySQL connection URL.
+        target: String,
+        query: String,
+        identifier: String,
+        batch_size: usize,
+    }
+
+    impl SqlSource {
+        /// A SQLite source over `path` (a file, or `:memory:`).
+        pub fn sqlite(
+            path: impl Into<String>,
+            query: impl Into<String>,
+            identifier: impl Into<String>,
+        ) -> Self {
+            Self {
+                engine: SqlEngine::Sqlite,
+                target: path.into(),
+                query: query.into(),
+                identifier: identifier.into(),
+                batch_size: 0,
+            }
+        }
+
+        /// A MySQL source over a `mysql://…` URL.
+        pub fn mysql(
+            url: impl Into<String>,
+            query: impl Into<String>,
+            identifier: impl Into<String>,
+        ) -> Self {
+            Self {
+                engine: SqlEngine::MySql,
+                target: url.into(),
+                query: query.into(),
+                identifier: identifier.into(),
+                batch_size: 0,
+            }
+        }
+
+        pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+            self.batch_size = batch_size;
+            self
+        }
+
+        async fn read_rows(&self) -> anyhow::Result<Vec<Value>> {
+            match self.engine {
+                SqlEngine::Sqlite => {
+                    // rusqlite is blocking; keep it off the async runtime.
+                    let (target, query) = (self.target.clone(), self.query.clone());
+                    tokio::task::spawn_blocking(move || read_sqlite(&target, &query))
+                        .await
+                        .context("sqlite worker panicked")?
+                }
+                SqlEngine::MySql => read_mysql(&self.target, &self.query).await,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Source for SqlSource {
+        async fn fetch(&self) -> anyhow::Result<Vec<DataSet<Value>>> {
+            let rows = self.read_rows().await?;
+            Ok(chunk_into_datasets(
+                rows,
+                &self.query,
+                &self.identifier,
+                self.batch_size,
+            ))
+        }
+    }
+
+    fn read_sqlite(path: &str, query: &str) -> anyhow::Result<Vec<Value>> {
+        use rusqlite::types::ValueRef;
+        let conn = rusqlite::Connection::open(path)
+            .with_context(|| format!("opening SQLite {path}"))?;
+        let mut stmt = conn.prepare(query).context("preparing SQLite query")?;
+        let col_names: Vec<String> = stmt
+            .column_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let mut rows = stmt.query([]).context("running SQLite query")?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().context("reading SQLite row")? {
+            let mut map = serde_json::Map::new();
+            for (i, name) in col_names.iter().enumerate() {
+                let value = match row.get_ref(i).context("reading SQLite column")? {
+                    ValueRef::Null => Value::Null,
+                    ValueRef::Integer(n) => serde_json::json!(n),
+                    ValueRef::Real(f) => serde_json::json!(f),
+                    ValueRef::Text(t) => Value::String(String::from_utf8_lossy(t).into_owned()),
+                    ValueRef::Blob(b) => serde_json::json!(b),
+                };
+                map.insert(name.clone(), value);
+            }
+            out.push(Value::Object(map));
+        }
+        Ok(out)
+    }
+
+    async fn read_mysql(url: &str, query: &str) -> anyhow::Result<Vec<Value>> {
+        use mysql_async::{Value as MyVal, prelude::Queryable};
+        let pool = mysql_async::Pool::new(url);
+        let mut conn = pool.get_conn().await.context("connecting to MySQL")?;
+        let rows: Vec<mysql_async::Row> = conn.query(query).await.context("running MySQL query")?;
+        drop(conn);
+        pool.disconnect().await.ok();
+
+        let out = rows
+            .iter()
+            .map(|row| {
+                let mut map = serde_json::Map::new();
+                for (i, col) in row.columns_ref().iter().enumerate() {
+                    let value = match row.as_ref(i) {
+                        None | Some(MyVal::NULL) => Value::Null,
+                        Some(MyVal::Int(n)) => serde_json::json!(n),
+                        Some(MyVal::UInt(n)) => serde_json::json!(n),
+                        Some(MyVal::Float(f)) => serde_json::json!(f),
+                        Some(MyVal::Double(f)) => serde_json::json!(f),
+                        Some(MyVal::Bytes(b)) => Value::String(String::from_utf8_lossy(b).into_owned()),
+                        // Date/Time — render as their debug string.
+                        Some(other) => Value::String(format!("{other:?}")),
+                    };
+                    map.insert(col.name_str().into_owned(), value);
+                }
+                Value::Object(map)
+            })
+            .collect();
+        Ok(out)
+    }
+}
+
+#[cfg(feature = "http")]
+pub use http_source::{HttpSource, Pagination};
+
+#[cfg(feature = "http")]
+mod http_source {
+    use super::*;
+
+    /// How to page through an endpoint.
+    #[derive(Debug, Clone)]
+    pub enum Pagination {
+        /// One request, no paging.
+        None,
+        /// Append `?<param>=<n>` (or `&…` if the URL already has a query),
+        /// starting at `start`, until a page yields no items.
+        PageParam { param: String, start: u64 },
+    }
+
+    /// Pulls data from an HTTP/JSON endpoint into `DataSet<Value>`.
+    #[derive(Debug, Clone)]
+    pub struct HttpSource {
+        url: String,
+        /// Optional JSON pointer (e.g. `/data/items`) to the array of items.
+        /// When absent, the whole body is used (array → items, else one item).
+        pointer: Option<String>,
+        pagination: Pagination,
+        identifier: String,
+        batch_size: usize,
+    }
+
+    impl HttpSource {
+        pub fn new(url: impl Into<String>, identifier: impl Into<String>) -> Self {
+            Self {
+                url: url.into(),
+                pointer: None,
+                pagination: Pagination::None,
+                identifier: identifier.into(),
+                batch_size: 0,
+            }
+        }
+        pub fn with_pointer(mut self, pointer: impl Into<String>) -> Self {
+            self.pointer = Some(pointer.into());
+            self
+        }
+        pub fn with_pagination(mut self, pagination: Pagination) -> Self {
+            self.pagination = pagination;
+            self
+        }
+        pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+            self.batch_size = batch_size;
+            self
+        }
+    }
+
+    #[async_trait]
+    impl Source for HttpSource {
+        async fn fetch(&self) -> anyhow::Result<Vec<DataSet<Value>>> {
+            let client = reqwest::Client::new();
+            let mut all = Vec::new();
+            match &self.pagination {
+                Pagination::None => {
+                    let body: Value = client
+                        .get(&self.url)
+                        .send()
+                        .await
+                        .context("HTTP request failed")?
+                        .error_for_status()
+                        .context("HTTP error status")?
+                        .json()
+                        .await
+                        .context("decoding JSON response")?;
+                    all.extend(extract_items(&body, self.pointer.as_deref())?);
+                }
+                Pagination::PageParam { param, start } => {
+                    let mut page = *start;
+                    loop {
+                        let sep = if self.url.contains('?') { '&' } else { '?' };
+                        let url = format!("{}{sep}{param}={page}", self.url);
+                        let body: Value = client
+                            .get(&url)
+                            .send()
+                            .await
+                            .context("HTTP request failed")?
+                            .error_for_status()
+                            .context("HTTP error status")?
+                            .json()
+                            .await
+                            .context("decoding JSON response")?;
+                        let items = extract_items(&body, self.pointer.as_deref())?;
+                        if items.is_empty() {
+                            break;
+                        }
+                        all.extend(items);
+                        page += 1;
+                    }
+                }
+            }
+            Ok(chunk_into_datasets(
+                all,
+                &self.url,
+                &self.identifier,
+                self.batch_size,
+            ))
+        }
+    }
+
+    /// Pure extraction of the items array from a response body (unit-tested).
+    pub(super) fn extract_items(body: &Value, pointer: Option<&str>) -> anyhow::Result<Vec<Value>> {
+        let target = match pointer {
+            Some(p) => body
+                .pointer(p)
+                .with_context(|| format!("JSON pointer {p:?} not found in response"))?,
+            None => body,
+        };
+        match target {
+            Value::Array(items) => Ok(items.clone()),
+            other => Ok(vec![other.clone()]),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +595,49 @@ mod tests {
         let err = FileSource::new(&path, "x").unwrap().fetch().await.unwrap_err();
         assert!(format!("{err:#}").contains("line 2"), "error was: {err:#}");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(feature = "sql")]
+    #[tokio::test]
+    async fn sqlite_maps_rows_to_json_objects() {
+        let path = tmp("sql.db");
+        std::fs::remove_file(&path).ok();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE t (id INTEGER, name TEXT, score REAL);
+                 INSERT INTO t VALUES (1, 'ada', 9.5), (2, 'grace', NULL);",
+            )
+            .unwrap();
+        }
+        let src = SqlSource::sqlite(
+            path.to_string_lossy().into_owned(),
+            "SELECT id, name, score FROM t ORDER BY id",
+            "t",
+        );
+        let sets = src.fetch().await.unwrap();
+        let data = sets[0].data.as_ref().unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["id"], serde_json::json!(1));
+        assert_eq!(data[0]["name"], serde_json::json!("ada"));
+        assert_eq!(data[0]["score"], serde_json::json!(9.5));
+        assert_eq!(data[1]["score"], serde_json::json!(null));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn http_extract_items_with_and_without_pointer() {
+        use super::http_source::extract_items;
+        let body = serde_json::json!({"data": {"items": [{"a": 1}, {"a": 2}]}});
+        let items = extract_items(&body, Some("/data/items")).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["a"], serde_json::json!(1));
+
+        let array = serde_json::json!([{"x": 1}]);
+        assert_eq!(extract_items(&array, None).unwrap().len(), 1);
+
+        assert!(extract_items(&body, Some("/nope")).is_err());
     }
 
     #[tokio::test]

@@ -11,6 +11,10 @@ default = []
 # Enables the PostgreSQL connectors: `intake::PostgresSource` and the
 # `db::PostgresSink` ("internal lensing project database" sink).
 postgres = ["dep:tokio-postgres"]
+# Enables `intake::SqlSource` for SQLite (rusqlite) and MySQL (mysql_async).
+sql = ["dep:rusqlite", "dep:mysql_async"]
+# Enables `intake::HttpSource` (paginated REST over reqwest).
+http = ["dep:reqwest"]
 
 [dependencies]
 anyhow = "1.0.100"
@@ -35,3 +39,8 @@ toml = "0.9.8"
 indicatif = "0.18.2"
 uuid = "1.18.1"
 clap = { version = "4.5.51", features = ["derive"] }
+# Pinned < 0.40: rusqlite 0.40 pulls libsqlite3-sys 0.38 whose build script
+# uses the unstable `cfg_select!` macro (needs a newer rustc than 1.93).
+rusqlite = { version = "0.34", features = ["bundled"], optional = true }
+mysql_async = { version = "0.37.0", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
