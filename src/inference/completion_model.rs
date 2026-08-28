@@ -15,18 +15,41 @@ use llm::{
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc;
 
+/// A text-completion client backed by an [`llm::LLMProvider`].
+///
+/// Values passed to [`Self::perform_completion`] are serialized as JSON and
+/// sent one at a time. The constructor's prompt becomes the provider's system
+/// prompt.
+///
+/// # Example
+///
+/// ```no_run
+/// use lvv::inference::CompletionModel;
+/// # async fn example() -> anyhow::Result<()> {
+/// let model = CompletionModel::new("llama3.2", "Summarize each JSON value")?;
+/// let summaries = model.perform_completion(vec!["a long document"]).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct CompletionModel {
+    /// Configured provider implementation.
     pub model: Box<dyn LLMProvider>,
 }
 
+/// Applies a generated string to one field of a value.
 pub trait FieldEnhanceable {
+    /// Updates the implementation-defined field.
     fn set_field(&mut self, modifications: String);
 }
 
+/// Applies a generated value of type `T` to one field of a value.
 pub trait FieldEnhanceableG<T> {
+    /// Updates the implementation-defined field.
     fn set_field(&mut self, modifications: T);
 }
+/// Applies generated values to several named fields.
 pub trait FieldsEnhanceable<T> {
+    /// Updates fields identified by the keys of `modifications`.
     fn set_fields(&mut self, modifications: HashMap<String, Box<dyn FieldEnhanceableG<T>>>);
 }
 
@@ -79,6 +102,10 @@ impl LiveDumpFile {
 //BUG: PRUEBAAA
 impl CompletionModel {
     // TODO: Ver si esto se puede implementar de alguna otra manera.
+    /// Creates an Ollama completion client with a system prompt.
+    ///
+    /// The endpoint is read from `OLLAMA_URL` and defaults to the local Ollama
+    /// endpoint at `http://127.0.0.1:11434`.
     pub fn new(model: impl Into<String>, prompt: impl Into<String>) -> anyhow::Result<Self> {
         let base_url = std::env::var("OLLAMA_URL").unwrap_or("http://127.0.0.1:11434".into());
         let llm = LLMBuilder::new()
@@ -92,6 +119,7 @@ impl CompletionModel {
         Ok(CompletionModel { model: llm })
     }
     // TODO: Ver si esto se puede implementar de alguna otra manera.
+    /// Creates an OpenAI completion client using `OPENAI_API_KEY`.
     pub fn new_openai(model: impl Into<String>, prompt: impl Into<String>) -> anyhow::Result<Self> {
         dotenvy::dotenv().context(".env absent")?;
         let api_key = std::env::var("OPENAI_API_KEY").context("Api key absent")?;
@@ -104,6 +132,12 @@ impl CompletionModel {
             .context("Error creando modelo embdding")?;
         Ok(CompletionModel { model: llm })
     }
+    /// Completes every serialized item while preparing incremental output.
+    ///
+    /// # Panics
+    ///
+    /// This method is unfinished and currently always panics after contacting
+    /// the provider. Use [`Self::perform_completion`] instead.
     pub async fn perform_completion_and_live_dump<T>(
         &self,
         dataset: Vec<T>,
@@ -166,6 +200,10 @@ impl CompletionModel {
         todo!("finish this");
         // Ok(generated_articles)
     }
+    /// Completes every item and returns successful response texts in input order.
+    ///
+    /// Provider failures are reported through progress output and omitted from
+    /// the returned vector.
     pub async fn perform_completion<T>(&self, dataset: Vec<T>) -> anyhow::Result<Vec<String>>
     where
         T: Serialize,
@@ -224,6 +262,8 @@ impl CompletionModel {
         Ok(generated_articles)
     }
 
+    /// Completes each item, applies its response, and rewrites a JSON dump after
+    /// every successful completion.
     pub async fn perform_completion_dump_inelegant<T>(
         &self,
         dataset: Vec<T>,
@@ -306,6 +346,7 @@ impl CompletionModel {
         Ok(generated_articles)
     }
 }
+/// Serializes `data` to `filename`, replacing any previous contents.
 pub async fn dump_on_each_iteration<T>(
     data: &Vec<T>,
     filename: impl Into<String>,

@@ -17,6 +17,27 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
+/// Executes embedding jobs sequentially and writes each result to configured sinks.
+///
+/// The queue checks its optional [`Cache`] before contacting an embedding
+/// provider. Explicit sinks execute in registration order; the first error
+/// aborts processing and includes the names of sinks already written. Use
+/// [`Self::with_sink`] for custom or multi-destination pipelines.
+///
+/// # Example
+///
+/// ```no_run
+/// use lvv::{db::Sink, jobs::job::Job, jobs::job_queue::JobQueue};
+/// use serde::Serialize;
+/// use std::sync::Arc;
+///
+/// fn prepare<T>(jobs: Vec<Job<T>>, sink: Arc<dyn Sink>) -> JobQueue<T>
+/// where T: Serialize + Clone {
+///     let mut queue = JobQueue::from_vec(jobs);
+///     queue.with_sink(sink);
+///     queue
+/// }
+/// ```
 pub struct JobQueue<T: Serialize + Clone> {
     queue: Vec<Job<T>>,
     cache: Option<Cache>,
@@ -32,6 +53,7 @@ impl<T> JobQueue<T>
 where
     T: Serialize + Clone,
 {
+    /// Creates a queue from jobs, without a cache or sinks.
     pub fn from_vec(vec: Vec<Job<T>>) -> Self {
         // Build without using `Default` to avoid requiring `T: Default`.
         JobQueue {
@@ -41,6 +63,7 @@ where
             sinks: Vec::new(),
         }
     }
+    /// Adds an embedding cache used while building and running the queue.
     pub fn with_cache(&mut self, cache: Cache) -> &mut Self {
         self.cache = Some(cache);
         self
@@ -64,6 +87,7 @@ where
         self.sinks.push(Arc::new(QdrantSink::new(params)));
         self
     }
+    /// Resolves cached embeddings and returns a cloned, runnable queue.
     pub fn build(&mut self) -> Self {
         if let Some(cache) = self.clone().cache {
             self.queue.iter_mut().for_each(|job| {
@@ -85,6 +109,10 @@ where
     }
 
     // TODO: Rehacer
+    /// Embeds every queued dataset and writes it to each sink in order.
+    ///
+    /// Processing stops at the first sink failure and the error reports which
+    /// earlier sinks completed.
     pub async fn run(&mut self) -> anyhow::Result<()> {
         // Use each job inside the loop; previous code referenced `job` before it existed.
         for job in self.clone().queue.into_iter().progress() {

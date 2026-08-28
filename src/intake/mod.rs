@@ -1,4 +1,8 @@
+//! Dataset containers and connectors for loading source records.
+
+/// Generic dataset container.
 pub mod dataset;
+/// File and optional PostgreSQL source connectors.
 pub mod source;
 
 pub use source::{FileFormat, FileSource, Source};

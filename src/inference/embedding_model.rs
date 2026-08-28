@@ -8,11 +8,35 @@ use llm::{
 use serde::Serialize;
 
 use crate::intake::dataset::DataSet;
+/// A vector-embedding client backed by an [`llm::LLMProvider`].
+///
+/// Construct a client for one provider, then pass a
+/// [`DataSet`] to [`Self::embed_properties`].
+/// The returned vectors preserve record order and can be paired positionally
+/// with the original dataset.
+///
+/// # Example
+///
+/// ```no_run
+/// use lvv::{inference::EmbeddingProvider, intake::dataset::DataSet};
+/// # async fn example() -> anyhow::Result<()> {
+/// let provider = EmbeddingProvider::new("nomic-embed-text")?;
+/// let dataset = DataSet::new("memory", "notes", vec!["one", "two"]);
+/// let vectors = provider.embed_properties(dataset).await?;
+/// assert_eq!(vectors.len(), 2);
+/// # Ok(())
+/// # }
+/// ```
 pub struct EmbeddingProvider {
+    /// Configured provider implementation.
     pub model: Box<dyn LLMProvider>,
 }
 
 impl EmbeddingProvider {
+    /// Creates an Ollama embedding client.
+    ///
+    /// The endpoint is read from `OLLAMA_URL` and defaults to the local Ollama
+    /// endpoint at `http://127.0.0.1:11434`.
     pub fn new(model: &str) -> anyhow::Result<Self> {
         let base_url = std::env::var("OLLAMA_URL").unwrap_or("http://127.0.0.1:11434".into());
         let llm = LLMBuilder::new()
@@ -23,6 +47,7 @@ impl EmbeddingProvider {
             .context("Error creando modelo embdding")?;
         Ok(EmbeddingProvider { model: llm })
     }
+    /// Creates an OpenAI embedding client using `OPENAI_API_KEY`.
     pub fn new_openai(model: &str) -> anyhow::Result<Self> {
         dotenvy::dotenv().context(".env absent")?;
         let api_key = std::env::var("OPENAI_API_KEY").context("Api key absent")?;

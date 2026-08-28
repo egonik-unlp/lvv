@@ -1,4 +1,5 @@
-//! Data-origin connectors that produce embeddable [`DataSet`]s.
+//! Data-origin connectors that produce embeddable
+//! [`DataSet`](crate::intake::dataset::DataSet)s.
 //!
 //! [`Source`] decouples *where the data comes from* from the rest of the
 //! pipeline (embed → sink). A connector reads its origin and yields one or more
@@ -79,7 +80,23 @@ pub struct FileSource {
 }
 
 impl FileSource {
-    /// Build a source over `path`, inferring the format from its extension.
+    /// Builds a source over `path`, inferring the format from its extension.
+    ///
+    /// Recognized extensions are `.csv`, `.json`, `.jsonl`, and `.ndjson`.
+    /// Use [`Self::with_format`] when the path has another extension.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use lvv::intake::source::{FileSource, Source};
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let batches = FileSource::new("records.jsonl", "records")?
+    ///     .with_batch_size(500)
+    ///     .fetch()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(path: impl Into<PathBuf>, identifier: impl Into<String>) -> anyhow::Result<Self> {
         let path = path.into();
         let format = FileFormat::from_path(&path)?;
@@ -91,13 +108,13 @@ impl FileSource {
         })
     }
 
-    /// Override the auto-detected format.
+    /// Overrides the auto-detected format.
     pub fn with_format(mut self, format: FileFormat) -> Self {
         self.format = format;
         self
     }
 
-    /// Emit one `DataSet` per `batch_size` rows (0 = a single `DataSet`).
+    /// Emits one `DataSet` per `batch_size` rows (0 = a single `DataSet`).
     pub fn with_batch_size(mut self, batch_size: usize) -> Self {
         self.batch_size = batch_size;
         self
@@ -190,6 +207,10 @@ mod postgres_source {
     }
 
     impl PostgresSource {
+        /// Creates a source from a PostgreSQL connection string and `SELECT` query.
+        ///
+        /// `identifier` becomes the dataset's logical name. The query is
+        /// executed without parameters and should only come from trusted input.
         pub fn new(
             conn_str: impl Into<String>,
             query: impl Into<String>,
@@ -203,6 +224,7 @@ mod postgres_source {
             }
         }
 
+        /// Emits one dataset per `batch_size` rows (0 = one dataset).
         pub fn with_batch_size(mut self, batch_size: usize) -> Self {
             self.batch_size = batch_size;
             self
@@ -248,12 +270,36 @@ mod postgres_source {
     fn column_to_json(row: &tokio_postgres::Row, i: usize, ty: &Type) -> Value {
         use serde_json::json;
         match *ty {
-            Type::BOOL => row.try_get::<_, Option<bool>>(i).ok().flatten().map(|v| json!(v)),
-            Type::INT2 => row.try_get::<_, Option<i16>>(i).ok().flatten().map(|v| json!(v)),
-            Type::INT4 => row.try_get::<_, Option<i32>>(i).ok().flatten().map(|v| json!(v)),
-            Type::INT8 => row.try_get::<_, Option<i64>>(i).ok().flatten().map(|v| json!(v)),
-            Type::FLOAT4 => row.try_get::<_, Option<f32>>(i).ok().flatten().map(|v| json!(v)),
-            Type::FLOAT8 => row.try_get::<_, Option<f64>>(i).ok().flatten().map(|v| json!(v)),
+            Type::BOOL => row
+                .try_get::<_, Option<bool>>(i)
+                .ok()
+                .flatten()
+                .map(|v| json!(v)),
+            Type::INT2 => row
+                .try_get::<_, Option<i16>>(i)
+                .ok()
+                .flatten()
+                .map(|v| json!(v)),
+            Type::INT4 => row
+                .try_get::<_, Option<i32>>(i)
+                .ok()
+                .flatten()
+                .map(|v| json!(v)),
+            Type::INT8 => row
+                .try_get::<_, Option<i64>>(i)
+                .ok()
+                .flatten()
+                .map(|v| json!(v)),
+            Type::FLOAT4 => row
+                .try_get::<_, Option<f32>>(i)
+                .ok()
+                .flatten()
+                .map(|v| json!(v)),
+            Type::FLOAT8 => row
+                .try_get::<_, Option<f64>>(i)
+                .ok()
+                .flatten()
+                .map(|v| json!(v)),
             Type::JSON | Type::JSONB => row.try_get::<_, Option<Value>>(i).ok().flatten(),
             // varchar/text/uuid/timestamp/... — read as text.
             _ => row
@@ -553,7 +599,11 @@ mod tests {
     async fn jsonl_maps_one_item_per_line() {
         let path = tmp("a.jsonl");
         std::fs::write(&path, "{\"id\":1,\"t\":\"x\"}\n\n{\"id\":2,\"t\":\"y\"}\n").unwrap();
-        let sets = FileSource::new(&path, "things").unwrap().fetch().await.unwrap();
+        let sets = FileSource::new(&path, "things")
+            .unwrap()
+            .fetch()
+            .await
+            .unwrap();
         assert_eq!(sets.len(), 1);
         let data = sets[0].data.as_ref().unwrap();
         assert_eq!(data.len(), 2);
@@ -565,7 +615,11 @@ mod tests {
     async fn csv_uses_header_as_fields() {
         let path = tmp("b.csv");
         std::fs::write(&path, "name,city\nada,london\ngrace,nyc\n").unwrap();
-        let sets = FileSource::new(&path, "people").unwrap().fetch().await.unwrap();
+        let sets = FileSource::new(&path, "people")
+            .unwrap()
+            .fetch()
+            .await
+            .unwrap();
         let data = sets[0].data.as_ref().unwrap();
         assert_eq!(data.len(), 2);
         assert_eq!(data[0]["name"], serde_json::json!("ada"));
@@ -592,7 +646,11 @@ mod tests {
     async fn malformed_jsonl_reports_offending_line() {
         let path = tmp("d.jsonl");
         std::fs::write(&path, "{\"ok\":1}\nNOT JSON\n").unwrap();
-        let err = FileSource::new(&path, "x").unwrap().fetch().await.unwrap_err();
+        let err = FileSource::new(&path, "x")
+            .unwrap()
+            .fetch()
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("line 2"), "error was: {err:#}");
         std::fs::remove_file(&path).ok();
     }

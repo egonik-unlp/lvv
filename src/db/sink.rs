@@ -49,6 +49,20 @@ pub struct QdrantSink {
 }
 
 impl QdrantSink {
+    /// Creates a Qdrant sink using reusable database parameters.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lvv::db::{Distance, QdrantSink};
+    /// use lvv::db::vector_database::{DatabaseParams, Location};
+    /// let sink = QdrantSink::new(DatabaseParams::new(
+    ///     Location::new_local("http://localhost:6334"),
+    ///     "documents".into(),
+    ///     Distance::Cosine,
+    ///     768,
+    /// ));
+    /// ```
     pub fn new(params: DatabaseParams) -> Self {
         Self { params }
     }
@@ -113,8 +127,15 @@ mod postgres_sink {
     }
 
     impl PostgresSink {
-        /// `table` must be a plain SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`) — it
-        /// is interpolated into DDL/DML, so it cannot be parameterised.
+        /// Creates a sink that upserts JSON rows into `table`.
+        ///
+        /// `table` must be a plain SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`)
+        /// because it is interpolated into DDL/DML. The connection string is
+        /// passed to `tokio-postgres` unchanged.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the table name is not a valid identifier.
         pub fn new(conn_str: impl Into<String>, table: impl Into<String>) -> anyhow::Result<Self> {
             let table = table.into();
             if !is_valid_ident(&table) {

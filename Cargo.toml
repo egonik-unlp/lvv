@@ -1,10 +1,20 @@
 [package]
 name = "lvv"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
+rust-version = "1.85"
 license = "Apache-2.0"
 description = "A pipeline for embedding datasets with LLMs (Ollama/OpenAI) and loading them into a Qdrant vector database, with caching and job queuing."
 repository = "https://github.com/egonik-unlp/lvv"
+homepage = "https://github.com/egonik-unlp/lvv"
+documentation = "https://docs.rs/lvv"
+readme = "README.md"
+keywords = ["embeddings", "llm", "qdrant", "ollama", "openai"]
+categories = ["database", "web-programming"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
