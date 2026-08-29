@@ -70,3 +70,5 @@ pub mod inference;
 pub mod intake;
 /// Embedding jobs and queue execution.
 pub mod jobs;
+
+pub mod transform;

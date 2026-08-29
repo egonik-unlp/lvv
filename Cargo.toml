@@ -53,4 +53,8 @@ clap = { version = "4.5.51", features = ["derive"] }
 # uses the unstable `cfg_select!` macro (needs a newer rustc than 1.93).
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 mysql_async = { version = "0.37.0", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+], optional = true }
+lvv-macros = { path = "../lvv-macros/" }
