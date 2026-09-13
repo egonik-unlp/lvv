@@ -2,7 +2,7 @@ use qdrant_client::Payload;
 use serde::{Serialize, de::DeserializeOwned};
 
 pub trait VectorDatabaseItem: DeserializeOwned + Serialize {
-    fn category(&self) -> &'static str;
+    fn category(&self) -> String;
     fn into_description(&self) -> String;
     fn into_payload(&self) -> anyhow::Result<Payload> {
         let payload: Payload = serde_json::to_value(self)
@@ -27,13 +27,13 @@ pub trait VectorDatabase {
 }
 #[derive(Debug)]
 pub struct VectorPointDraft {
-    pub category: &'static str,
+    pub category: String,
     pub description: String,
     pub payload: Payload,
 }
 
 impl VectorPointDraft {
-    pub fn new(category: &'static str, description: String, payload: Payload) -> Self {
+    pub fn new(category: String, description: String, payload: Payload) -> Self {
         Self {
             category,
             description,
