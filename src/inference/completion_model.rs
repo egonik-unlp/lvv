@@ -15,39 +15,90 @@ use llm::{
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc;
 
-/// A text-completion client backed by an [`llm::LLMProvider`].
+/// A chat model that transforms records before they are embedded: summaries,
+/// keywords, translations, or any other text you can ask an LLM for.
 ///
-/// Values passed to [`Self::perform_completion`] are serialized as JSON and
-/// sent one at a time. The constructor's prompt becomes the provider's system
-/// prompt.
+/// The prompt given to [`new`](Self::new) or [`new_openai`](Self::new_openai)
+/// is the system prompt, so it holds your instructions. Each record is
+/// serialized as JSON and sent in its own chat, one record at a time. Every
+/// chat also carries two fixed messages that introduce the record as input for
+/// summarization, whatever the system prompt asks for.
+///
+/// - [`perform_completion`](Self::perform_completion) returns the response
+///   texts.
+/// - [`perform_completion_dump_inelegant`](Self::perform_completion_dump_inelegant)
+///   stores each response in its record through [`FieldEnhanceable`] and saves
+///   the updated records to a JSON file as it goes.
+///
+/// Records that fail are left out of the results instead of returning an
+/// error, so compare the number of responses with the number of records.
 ///
 /// # Example
 ///
+/// Summarize articles, then embed each title with its summary:
+///
 /// ```no_run
-/// use lvv::inference::CompletionModel;
-/// # async fn example() -> anyhow::Result<()> {
-/// let model = CompletionModel::new("llama3.2", "Summarize each JSON value")?;
-/// let summaries = model.perform_completion(vec!["a long document"]).await?;
+/// use lvv::inference::{CompletionModel, EmbeddingProvider};
+/// use lvv::intake::dataset::DataSet;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// struct Article {
+///     title: String,
+///     body: String,
+/// }
+///
+/// # async fn example(articles: Vec<Article>) -> anyhow::Result<()> {
+/// let model = CompletionModel::new(
+///     "llama3.2",
+///     "Summarize the article in one sentence. Reply with the sentence only.",
+/// )?;
+/// let summaries = model
+///     .perform_completion(articles.iter().collect::<Vec<_>>())
+///     .await?;
+/// // Failed records are left out, so check before pairing.
+/// anyhow::ensure!(summaries.len() == articles.len(), "some completions failed");
+///
+/// let texts: Vec<String> = articles
+///     .iter()
+///     .zip(&summaries)
+///     .map(|(article, summary)| format!("{}\n{summary}", article.title))
+///     .collect();
+/// let vectors = EmbeddingProvider::new("nomic-embed-text")?
+///     .embed_properties(DataSet::new("articles", "summaries", texts))
+///     .await?;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// With the `derive` feature, store the response in a field marked
+/// `#[lvv(description)]` instead; see
+/// [`perform_completion_dump_inelegant`](Self::perform_completion_dump_inelegant).
 pub struct CompletionModel {
     /// Configured provider implementation.
     pub model: Box<dyn LLMProvider>,
 }
 
-/// Applies a generated string to one field of a value.
+/// Receives the LLM response for one record.
+///
+/// [`CompletionModel::perform_completion_dump_inelegant`] calls
+/// [`set_field`](Self::set_field) with each record's response. Store it in the
+/// field that should hold the result.
 pub trait FieldEnhanceable {
-    /// Updates the implementation-defined field.
+    /// Stores the response text in the record.
     fn set_field(&mut self, modifications: String);
 }
 
 /// Applies a generated value of type `T` to one field of a value.
+///
+/// Not used by [`CompletionModel`] yet.
 pub trait FieldEnhanceableG<T> {
     /// Updates the implementation-defined field.
     fn set_field(&mut self, modifications: T);
 }
 /// Applies generated values to several named fields.
+///
+/// Not used by [`CompletionModel`] yet.
 pub trait FieldsEnhanceable<T> {
     /// Updates fields identified by the keys of `modifications`.
     fn set_fields(&mut self, modifications: HashMap<String, Box<dyn FieldEnhanceableG<T>>>);
@@ -102,10 +153,11 @@ impl LiveDumpFile {
 //BUG: PRUEBAAA
 impl CompletionModel {
     // TODO: Ver si esto se puede implementar de alguna otra manera.
-    /// Creates an Ollama completion client with a system prompt.
+    /// Creates an Ollama chat client whose system prompt is `prompt`.
     ///
-    /// The endpoint is read from `OLLAMA_URL` and defaults to the local Ollama
-    /// endpoint at `http://127.0.0.1:11434`.
+    /// The endpoint is read from `OLLAMA_URL` and defaults to
+    /// `http://127.0.0.1:11434`. The model isn't contacted until a completion
+    /// runs, so a wrong model name shows up then, as failed records.
     pub fn new(model: impl Into<String>, prompt: impl Into<String>) -> anyhow::Result<Self> {
         let base_url = std::env::var("OLLAMA_URL").unwrap_or("http://127.0.0.1:11434".into());
         let llm = LLMBuilder::new()
@@ -119,7 +171,15 @@ impl CompletionModel {
         Ok(CompletionModel { model: llm })
     }
     // TODO: Ver si esto se puede implementar de alguna otra manera.
-    /// Creates an OpenAI completion client using `OPENAI_API_KEY`.
+    /// Creates an OpenAI chat client whose system prompt is `prompt`.
+    ///
+    /// Reads `OPENAI_API_KEY` after loading a `.env` file from the current
+    /// directory or one of its parents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no `.env` file is found, even when `OPENAI_API_KEY`
+    /// is already set, or if `OPENAI_API_KEY` is missing.
     pub fn new_openai(model: impl Into<String>, prompt: impl Into<String>) -> anyhow::Result<Self> {
         dotenvy::dotenv().context(".env absent")?;
         let api_key = std::env::var("OPENAI_API_KEY").context("Api key absent")?;
@@ -200,10 +260,23 @@ impl CompletionModel {
         todo!("finish this");
         // Ok(generated_articles)
     }
-    /// Completes every item and returns successful response texts in input order.
+    /// Sends each record to the model and returns the response texts, in record
+    /// order.
     ///
-    /// Provider failures are reported through progress output and omitted from
-    /// the returned vector.
+    /// Records are sent one at a time, each serialized as JSON in its own chat.
+    /// A progress bar shows the tokens used so far, and the indices of failed
+    /// records are printed at the end.
+    ///
+    /// Records that fail, or whose response has no text, are left out of the
+    /// result instead of returning an error. A wrong model name, for example,
+    /// fails every record and returns `Ok` with an empty vector. Compare the
+    /// lengths before pairing responses with records.
+    ///
+    /// See [`CompletionModel`] for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if a record can't be serialized as JSON.
     pub async fn perform_completion<T>(&self, dataset: Vec<T>) -> anyhow::Result<Vec<String>>
     where
         T: Serialize,
@@ -262,8 +335,73 @@ impl CompletionModel {
         Ok(generated_articles)
     }
 
-    /// Completes each item, applies its response, and rewrites a JSON dump after
-    /// every successful completion.
+    /// Sends each record to the model, stores each response in its record with
+    /// [`FieldEnhanceable::set_field`], and saves the updated records to
+    /// `filename`.
+    ///
+    /// After every successful record, `filename` is rewritten as a JSON array
+    /// of all the records updated so far, so an interrupted run keeps its
+    /// progress. The updated records are only available from that file: the
+    /// method returns the response texts, like
+    /// [`perform_completion`](Self::perform_completion). Failed records are
+    /// left out of both.
+    ///
+    /// # Example
+    ///
+    /// A summary written by the model becomes part of the text that a derived
+    /// [`VectorDatabaseItem`](crate::transform::transform::VectorDatabaseItem)
+    /// embeds:
+    ///
+    #[cfg_attr(feature = "derive", doc = "```no_run")]
+    #[cfg_attr(not(feature = "derive"), doc = "```ignore")]
+    /// use lvv::inference::{CompletionModel, completion_model::FieldEnhanceable};
+    /// use lvv::transform::transform::VectorDatabaseItem;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Clone, Serialize, Deserialize, VectorDatabaseItem)]
+    /// struct Article {
+    ///     #[lvv(description)]
+    ///     title: String,
+    ///     body: String,
+    ///     // Filled in by the model, then embedded with the title.
+    ///     #[lvv(description)]
+    ///     summary: Option<String>,
+    /// }
+    ///
+    /// impl FieldEnhanceable for Article {
+    ///     fn set_field(&mut self, response: String) {
+    ///         self.summary = Some(response);
+    ///     }
+    /// }
+    ///
+    /// # async fn example(articles: Vec<Article>) -> anyhow::Result<()> {
+    /// let model = CompletionModel::new(
+    ///     "llama3.2",
+    ///     "Summarize the article in one sentence. Reply with the sentence only.",
+    /// )?;
+    /// model
+    ///     .perform_completion_dump_inelegant(articles, "articles.json".into())
+    ///     .await?;
+    ///
+    /// let summarized: Vec<Article> =
+    ///     serde_json::from_str(&std::fs::read_to_string("articles.json")?)?;
+    /// for article in &summarized {
+    ///     // The description is "<title>\n<summary>".
+    ///     let draft = article.try_into_database_item()?;
+    ///     println!("{}", draft.description);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a record can't be serialized as JSON.
+    ///
+    /// # Panics
+    ///
+    /// If `filename` can't be written, this method panics or returns an error,
+    /// depending on when the write fails.
     pub async fn perform_completion_dump_inelegant<T>(
         &self,
         dataset: Vec<T>,

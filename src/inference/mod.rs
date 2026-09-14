@@ -3,6 +3,7 @@
 /// Embedding generation through Ollama or OpenAI.
 pub mod embedding_model;
 pub use embedding_model::EmbeddingProvider;
-/// Text completion through Ollama or OpenAI.
+/// Chat completion through Ollama or OpenAI, for transforming records with an
+/// LLM before they are embedded.
 pub mod completion_model;
 pub use completion_model::CompletionModel;

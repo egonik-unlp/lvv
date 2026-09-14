@@ -4,15 +4,19 @@
 and loading them into one or more storage backends. It supports Ollama and
 OpenAI models, reusable embedding caches, sequential job queues, Qdrant, flat
 files, optional SQL, HTTP and PostgreSQL connectors, and derive macros that let
-your own Rust types describe what gets embedded and what gets stored.
+your own Rust types describe what gets embedded and what gets stored. Records
+can also be transformed by an LLM, for example summarized, before they are
+embedded.
 
 ## Pipeline
 
 1. Load records with a file, SQL, HTTP or PostgreSQL source, or create a
    `DataSet` directly.
-2. Configure an embedding `Job` with an Ollama or OpenAI model.
-3. Add the job to a `JobQueue`.
-4. Register one or more sinks and run the queue.
+2. Optionally transform the records with an LLM; see
+   [Transforming records with LLMs](#transforming-records-with-llms).
+3. Configure an embedding `Job` with an Ollama or OpenAI model.
+4. Add the job to a `JobQueue`.
+5. Register one or more sinks and run the queue.
 
 ```rust,no_run
 use lvv::{
@@ -109,14 +113,87 @@ and the
 for embedding and storing drafts.
 
 [`examples/derive.rs`](https://github.com/egonik-unlp/lvv/blob/main/examples/derive.rs)
-is a complete program that uses both derives: it prints the points of a small
-portfolio, embeds them with Ollama and stores them in Qdrant.
+is a complete lvv pipeline over derived structs. It reads records from JSON
+Lines, CSV and JSON files with `FileSource`, turns them into points with the
+derives, embeds the descriptions with Ollama using a `Cache`, and runs a
+`JobQueue` that writes one Qdrant collection per category.
 
 ```sh
-cargo run --example derive --features derive                  # print the points
-cargo run --example derive --features derive -- --embed       # embed with Ollama
+cargo run --example derive --features derive                  # load and print the points
+cargo run --example derive --features derive -- --embed       # embed and build the jobs
 cargo run --example derive --features derive -- --embed --qdrant http://localhost:6334
 ```
+
+## Transforming records with LLMs
+
+`inference::CompletionModel` sends records to an Ollama or OpenAI chat model
+before they are embedded, to summarize long text, extract keywords, translate,
+or clean up inconsistent fields. The prompt you give it is the system prompt,
+and each record is sent as JSON in its own chat.
+
+1. Create a `CompletionModel` with a model name and your instructions.
+2. Run it over the records:
+   - `perform_completion` returns the response texts, in record order.
+   - `perform_completion_dump_inelegant` stores each response in its record
+     through `FieldEnhanceable`, and saves the updated records to a JSON file
+     as it goes.
+3. Embed the result: build a `DataSet` from the updated records or, with the
+   `derive` feature, mark the field that holds the response
+   `#[lvv(description)]`.
+
+```rust,ignore
+use lvv::inference::{CompletionModel, completion_model::FieldEnhanceable};
+use lvv::transform::transform::VectorDatabaseItem;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize, VectorDatabaseItem)]
+struct Article {
+    #[lvv(description)]
+    title: String,
+    body: String,
+    // Filled in by the model, then embedded with the title.
+    #[lvv(description)]
+    summary: Option<String>,
+}
+
+impl FieldEnhanceable for Article {
+    fn set_field(&mut self, response: String) {
+        self.summary = Some(response);
+    }
+}
+
+let model = CompletionModel::new(
+    "llama3.2",
+    "Summarize the article in one sentence. Reply with the sentence only.",
+)?;
+model
+    .perform_completion_dump_inelegant(articles, "articles.json".into())
+    .await?;
+
+let summarized: Vec<Article> =
+    serde_json::from_str(&std::fs::read_to_string("articles.json")?)?;
+let drafts = summarized
+    .iter()
+    .map(Article::try_into_database_item)
+    .collect::<anyhow::Result<Vec<_>>>()?;
+// drafts[0].description is "<title>\n<summary>".
+```
+
+Things to know:
+
+- Records are sent one at a time.
+- Records that fail are left out of the results instead of returning an error;
+  a wrong model name returns no responses at all. Compare the number of
+  responses with the number of records before pairing them.
+- `perform_completion_dump_inelegant` returns only the response texts. Read the
+  updated records from its file.
+- Every chat also contains two fixed messages that introduce the record as
+  input for summarization, whatever your prompt asks for.
+- `perform_completion_and_live_dump` is unfinished and panics.
+
+See the
+[`CompletionModel` documentation](https://docs.rs/lvv/latest/lvv/inference/completion_model/struct.CompletionModel.html)
+for details.
 
 ## Cargo features
 
@@ -138,8 +215,12 @@ lvv = { version = "0.5", features = ["derive", "postgres"] }
 
 - `OLLAMA_URL` selects the Ollama endpoint. It defaults to
   `http://127.0.0.1:11434`.
-- `OPENAI_API_KEY` authenticates OpenAI requests.
+- `OPENAI_API_KEY` authenticates OpenAI requests, for both completions and
+  embeddings.
 - `QDRANT_API_KEY` authenticates remote Qdrant requests.
+
+lvv loads a `.env` file before reading `OPENAI_API_KEY` or `QDRANT_API_KEY`,
+and fails if there isn't one.
 
 See the [API documentation](https://docs.rs/lvv) for detailed descriptions and
 examples for each public API.

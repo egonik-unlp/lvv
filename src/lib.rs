@@ -24,10 +24,27 @@
 //! [`transform::transform::VectorPointDraft`]: a category, the text to embed,
 //! and the payload to store with the vector. See [`transform::transform`].
 //!
+//! # Transforming records with LLMs
+//!
+//! Records can be rewritten by a chat model before they are embedded: to
+//! summarize long text, extract keywords, translate, or clean up inconsistent
+//! fields. [`inference::CompletionModel`] sends each record as JSON to an
+//! Ollama or OpenAI model, with your instructions as the system prompt, and
+//! returns the responses. Store a response in a field of its record through
+//! [`inference::completion_model::FieldEnhanceable`], then embed the updated
+//! records. With the `derive` feature, marking that field
+//! `#[lvv(description)]` makes the response part of the embedded text.
+//!
+//! Records that fail are left out of the results instead of returning an
+//! error, so compare the number of responses with the number of records. See
+//! [`inference::CompletionModel`] for examples.
+//!
 //! # Backends and environment variables
 //!
 //! Ollama uses `OLLAMA_URL`, defaulting to `http://127.0.0.1:11434`. OpenAI
-//! reads `OPENAI_API_KEY`. Remote Qdrant configuration reads `QDRANT_API_KEY`.
+//! reads `OPENAI_API_KEY`, and remote Qdrant configuration reads
+//! `QDRANT_API_KEY`. Both load a `.env` file first and fail if there isn't
+//! one.
 //!
 //! # Cargo features
 //!

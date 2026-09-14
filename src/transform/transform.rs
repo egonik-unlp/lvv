@@ -89,7 +89,8 @@
 //! See the [`lvv-macros` documentation](https://docs.rs/lvv-macros) for every
 //! attribute and the field types `VectorDatabase` accepts, and
 //! [`examples/derive.rs`](https://github.com/egonik-unlp/lvv/blob/main/examples/derive.rs)
-//! for a complete program that embeds and stores derived points.
+//! for a complete pipeline that loads derived records from files, embeds them
+//! and runs a `JobQueue` into Qdrant.
 //!
 //! # Implementing by hand
 //!

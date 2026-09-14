@@ -1,0 +1,17 @@
+[
+  {
+    "name": "lvv",
+    "summary": "Embeds datasets with Ollama or OpenAI and loads them into Qdrant",
+    "technologies": ["rust", "qdrant", "ollama"]
+  },
+  {
+    "name": "spectra-search",
+    "summary": "Finds similar infrared spectra by cosine similarity",
+    "technologies": ["python", "numpy"]
+  },
+  {
+    "name": "cv-indexer",
+    "summary": "Indexes a CV and a project catalog for a portfolio site's search",
+    "technologies": ["rust", "qdrant"]
+  }
+]
