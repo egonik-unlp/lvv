@@ -1,6 +1,5 @@
 // use lvv_core::{VectorDatabase, VectorDatabaseItem};
 use lvv::transform::transform::{VectorDatabase, VectorDatabaseItem};
-use lvv_macros::VectorDatabase;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -372,6 +372,9 @@ mod sql_source {
             }
         }
 
+        /// Splits the result into datasets of at most `batch_size` rows, named
+        /// `<identifier>_0`, `<identifier>_1`, …. `0`, the default, keeps every
+        /// row in one dataset.
         pub fn with_batch_size(mut self, batch_size: usize) -> Self {
             self.batch_size = batch_size;
             self
@@ -479,7 +482,12 @@ mod http_source {
         None,
         /// Append `?<param>=<n>` (or `&…` if the URL already has a query),
         /// starting at `start`, until a page yields no items.
-        PageParam { param: String, start: u64 },
+        PageParam {
+            /// Query parameter that carries the page number.
+            param: String,
+            /// First page number to request.
+            start: u64,
+        },
     }
 
     /// Pulls data from an HTTP/JSON endpoint into `DataSet<Value>`.
@@ -495,6 +503,7 @@ mod http_source {
     }
 
     impl HttpSource {
+        /// A source for the JSON endpoint at `url`, named `identifier`.
         pub fn new(url: impl Into<String>, identifier: impl Into<String>) -> Self {
             Self {
                 url: url.into(),
@@ -504,14 +513,21 @@ mod http_source {
                 batch_size: 0,
             }
         }
+        /// Reads items from the array at this JSON pointer (e.g. `/data/items`)
+        /// instead of the whole response body.
         pub fn with_pointer(mut self, pointer: impl Into<String>) -> Self {
             self.pointer = Some(pointer.into());
             self
         }
+        /// Sets how to page through the endpoint. Defaults to
+        /// [`Pagination::None`].
         pub fn with_pagination(mut self, pagination: Pagination) -> Self {
             self.pagination = pagination;
             self
         }
+        /// Splits the items into datasets of at most `batch_size`, named
+        /// `<identifier>_0`, `<identifier>_1`, …. `0`, the default, keeps every
+        /// item in one dataset.
         pub fn with_batch_size(mut self, batch_size: usize) -> Self {
             self.batch_size = batch_size;
             self

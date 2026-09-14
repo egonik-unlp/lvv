@@ -1,6 +1,6 @@
 [package]
 name = "lvv"
-version = "0.4.4"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -11,6 +11,7 @@ documentation = "https://docs.rs/lvv"
 readme = "README.md"
 keywords = ["embeddings", "llm", "qdrant", "ollama", "openai"]
 categories = ["database", "web-programming"]
+exclude = ["exp.rs"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -18,6 +19,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
+# Re-exports the `VectorDatabaseItem` and `VectorDatabase` derive macros from
+# `lvv-macros` in `lvv::transform::transform`.
+derive = ["dep:lvv-macros"]
 # Enables the PostgreSQL connectors: `intake::PostgresSource` and the
 # `db::PostgresSink` ("internal lensing project database" sink).
 postgres = ["dep:tokio-postgres"]
@@ -57,4 +61,16 @@ reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
 ], optional = true }
-lvv-macros = { path = "../lvv-macros/" }
+lvv-macros = { version = "0.1.1", path = "../lvv-macros/", optional = true }
+
+[[bin]]
+name = "probar_expansion"
+required-features = ["derive"]
+
+[[bin]]
+name = "portfolio_rag"
+required-features = ["derive"]
+
+[[example]]
+name = "derive"
+required-features = ["derive"]
