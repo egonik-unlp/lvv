@@ -1,6 +1,6 @@
 [package]
 name = "lvv"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -73,4 +73,8 @@ required-features = ["derive"]
 
 [[example]]
 name = "derive"
+required-features = ["derive"]
+
+[[example]]
+name = "full_pipeline"
 required-features = ["derive"]

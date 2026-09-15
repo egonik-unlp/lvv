@@ -94,6 +94,26 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Full example
+//!
+//! [`examples/full_pipeline.rs`](https://github.com/egonik-unlp/lvv/blob/main/examples/full_pipeline.rs)
+//! uses every stage in one program, with the `derive` feature:
+//!
+//! 1. [`intake::FileSource`] loads records from JSON Lines, CSV and JSON files
+//!    into structs that derive `VectorDatabaseItem`.
+//! 2. [`inference::CompletionModel`] writes a summary into each position, in a
+//!    field marked `#[lvv(description)]`.
+//! 3. `#[derive(VectorDatabase)]` turns the records into points.
+//! 4. [`inference::EmbeddingProvider`] embeds each category's descriptions,
+//!    reusing vectors from a [`cache::cache_embeddings::Cache`].
+//! 5. Each category becomes a [`jobs::job::Job`] with precomputed embeddings.
+//! 6. A [`jobs::job_queue::JobQueue`] writes the jobs to Qdrant.
+//!
+//! ```text
+//! cargo run --example full_pipeline --features derive
+//! QDRANT_URL=http://localhost:6334 cargo run --example full_pipeline --features derive
+//! ```
 
 /// Reusable embedding cache support.
 pub mod cache;
