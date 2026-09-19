@@ -24,7 +24,7 @@
 //!
 #![cfg_attr(feature = "derive", doc = "```")]
 #![cfg_attr(not(feature = "derive"), doc = "```ignore")]
-//! use lvv::transform::transform::{VectorDatabase, VectorDatabaseItem};
+//! use lvv::points::{VectorDatabase, VectorDatabaseItem};
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize, Deserialize, VectorDatabaseItem)]
@@ -95,7 +95,7 @@
 //! # Implementing by hand
 //!
 //! ```
-//! use lvv::transform::transform::VectorDatabaseItem;
+//! use lvv::points::VectorDatabaseItem;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize, Deserialize)]
@@ -131,14 +131,13 @@
 //!     db::{Distance, QdrantSink, Sink, SinkContext},
 //!     db::vector_database::{DatabaseParams, Location},
 //!     inference::EmbeddingProvider,
-//!     intake::dataset::DataSet,
-//!     transform::transform::VectorPointDraft,
+//!     points::VectorPointDraft,
 //! };
 //!
 //! # async fn store(drafts: Vec<VectorPointDraft>) -> anyhow::Result<()> {
-//! let descriptions: Vec<String> = drafts.iter().map(|d| d.description.clone()).collect();
-//! let embeddings = EmbeddingProvider::new("nomic-embed-text")?
-//!     .embed_properties(DataSet::new("portfolio", "points", descriptions))
+//! let descriptions: Vec<&str> = drafts.iter().map(|d| d.description.as_str()).collect();
+//! let embeddings = EmbeddingProvider::new("nomic-embed-text")
+//!     .embed_texts(&descriptions)
 //!     .await?;
 //! let rows = drafts
 //!     .iter()
@@ -163,13 +162,37 @@
 //! # }
 //! ```
 
-use std::fmt::Debug;
-
-use qdrant_client::Payload;
+use qdrant_client::{Payload, QdrantError};
 use serde::{Serialize, de::DeserializeOwned};
 
 #[cfg(feature = "derive")]
 pub use lvv_macros::{VectorDatabase, VectorDatabaseItem};
+
+/// Why a record couldn't become a [`VectorPointDraft`].
+#[derive(Debug, thiserror::Error)]
+pub enum PointError {
+    /// The record couldn't be serialized as JSON.
+    #[error("could not serialize the record: {0}")]
+    Serialize(#[from] serde_json::Error),
+    /// The record serialized to a JSON value of an unexpected shape, such as
+    /// a string where an object was needed.
+    #[error("`{category}` did not serialize to a JSON {expected}")]
+    Shape {
+        /// The record's category.
+        category: String,
+        /// The JSON shape the payload needs, such as `object`.
+        expected: String,
+    },
+    /// Qdrant rejected the payload.
+    #[error("invalid Qdrant payload: {0}")]
+    Payload(Box<QdrantError>),
+}
+
+impl From<QdrantError> for PointError {
+    fn from(err: QdrantError) -> Self {
+        PointError::Payload(Box::new(err))
+    }
+}
 
 /// A record that becomes one vector point.
 ///
@@ -177,7 +200,7 @@ pub use lvv_macros::{VectorDatabase, VectorDatabaseItem};
 /// [`into_description`](Self::into_description); the payload defaults to the
 /// record's JSON serialization. With the `derive` feature,
 /// `#[derive(VectorDatabaseItem)]` generates all three from field attributes.
-/// See the [module documentation](crate::transform::transform).
+/// See the [module documentation](crate::points).
 pub trait VectorDatabaseItem: DeserializeOwned + Serialize {
     /// The kind of record, used to group or filter points. The derive uses the
     /// struct name.
@@ -191,23 +214,20 @@ pub trait VectorDatabaseItem: DeserializeOwned + Serialize {
     /// # Errors
     ///
     /// Returns an error if the record doesn't serialize to a JSON object.
-    fn into_payload(&self) -> anyhow::Result<Payload> {
-        let payload: Payload = serde_json::to_value(self)
-            .map_err(|err| anyhow::anyhow!(err))?
-            .try_into()?;
-        Ok(payload)
+    fn into_payload(&self) -> Result<Payload, PointError> {
+        Ok(Payload::try_from(serde_json::to_value(self)?)?)
     }
     /// Builds this record's [`VectorPointDraft`] from the methods above.
     ///
     /// # Errors
     ///
     /// Returns the error from [`into_payload`](Self::into_payload).
-    fn try_into_database_item(&self) -> anyhow::Result<VectorPointDraft> {
+    fn try_into_database_item(&self) -> Result<VectorPointDraft, PointError> {
         let payload = self.into_payload()?;
         Ok(VectorPointDraft {
             category: self.category(),
             description: self.into_description(),
-            payload: payload,
+            payload,
         })
     }
 }
@@ -220,7 +240,7 @@ pub trait VectorDatabaseItem: DeserializeOwned + Serialize {
 /// types:
 ///
 /// ```
-/// use lvv::transform::transform::IntoDescriptionValue;
+/// use lvv::points::IntoDescriptionValue;
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]
@@ -302,7 +322,7 @@ pub trait VectorDatabase {
     /// # Errors
     ///
     /// Returns an error if any item's payload can't be built.
-    fn point_drafts(&self) -> anyhow::Result<Vec<VectorPointDraft>>;
+    fn point_drafts(&self) -> Result<Vec<VectorPointDraft>, PointError>;
 }
 
 /// A vector point before embedding: what to embed and what to store with it.
