@@ -1,2 +1,7 @@
 /target
 Cargo.lock
+/openspec
+/scripts
+/.claude
+/.githooks
+/graphify-out
