@@ -1,9 +1,8 @@
-// TODO: reemplazar anyhow con thiserror
 use std::fmt::Debug;
 use std::fmt::Display;
 
+use super::JobError;
 use crate::intake::dataset::DataSet;
-use anyhow::Context;
 use derive_builder::Builder;
 use qdrant_client::{Payload, qdrant::Distance};
 use serde::{Deserialize, Serialize};
@@ -129,25 +128,24 @@ impl<T: Serialize + Clone> Job<T> {
         }
     }
     /// Converts every dataset record into a Qdrant payload.
-    pub fn get_payloads(&self) -> anyhow::Result<Vec<Payload>> {
-        let mut payloads = vec![];
-        for datum in self.dataset.data.clone().context("Couldn't acquire data")? {
-            let value = serde_json::to_value(datum).context("Could not create value from data")?;
-            let payload = Payload::try_from(value).context("Could't create payload from data")?;
-            payloads.push(payload);
-        }
-        Ok(payloads)
+    pub fn get_payloads(&self) -> Result<Vec<Payload>, JobError> {
+        self.get_payload_values()?
+            .into_iter()
+            .map(|value| Payload::try_from(value).map_err(|e| JobError::Payload(Box::new(e))))
+            .collect()
     }
 
     /// Same rows as [`Job::get_payloads`], but as raw JSON values. Sinks that
     /// persist metadata (e.g. PostgreSQL) consume these; each sink turns them
     /// into its own representation (Qdrant re-derives `Payload`, Postgres stores
     /// them as `jsonb`).
-    pub fn get_payload_values(&self) -> anyhow::Result<Vec<serde_json::Value>> {
-        let mut values = vec![];
-        for datum in self.dataset.data.clone().context("Couldn't acquire data")? {
-            values.push(serde_json::to_value(datum).context("Could not create value from data")?);
-        }
-        Ok(values)
+    pub fn get_payload_values(&self) -> Result<Vec<serde_json::Value>, JobError> {
+        self.dataset
+            .data
+            .as_ref()
+            .ok_or(JobError::NoData)?
+            .iter()
+            .map(|datum| Ok(serde_json::to_value(datum)?))
+            .collect()
     }
 }

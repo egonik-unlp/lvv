@@ -1,6 +1,6 @@
-// TODO: reemplazar anyhow con thiserror
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
+
+use super::IntakeError;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// A named collection of records to embed.
 ///
@@ -45,13 +45,11 @@ where
     ///
     /// Returns an error if the dataset has no data or a record cannot be
     /// serialized.
-    pub fn serialize_to_vec(self) -> anyhow::Result<Vec<String>> {
-        let mut vec = vec![];
-        let data = self.data.context("No data")?;
-        for datum in data {
-            let string = serde_json::to_string(&datum).context("Couldn't serialize a node")?;
-            vec.push(string);
-        }
-        Ok(vec)
+    pub fn serialize_to_vec(self) -> Result<Vec<String>, IntakeError> {
+        self.data
+            .ok_or(IntakeError::NoData)?
+            .iter()
+            .map(|datum| serde_json::to_string(datum).map_err(IntakeError::Serialize))
+            .collect()
     }
 }

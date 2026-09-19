@@ -5,12 +5,42 @@
 //! (e.g. vectors to Qdrant and metadata to PostgreSQL). Sinks are held as
 //! `Arc<dyn Sink>` so a [`crate::jobs::job_queue::JobQueue`] stays `Clone`.
 
-use anyhow::Context;
 use async_trait::async_trait;
-use qdrant_client::Payload;
+use qdrant_client::{Payload, QdrantError};
 use serde_json::Value;
 
-use crate::db::{QdrantDatabase, vector_database::DatabaseParams};
+use crate::db::{
+    QdrantDatabase,
+    vector_database::{DatabaseParams, VectorDatabaseError},
+};
+
+/// Why a [`Sink`] failed to write.
+#[derive(Debug, thiserror::Error)]
+pub enum SinkError {
+    /// Connecting to Qdrant or writing to it failed.
+    #[error("Qdrant sink: {0}")]
+    Qdrant(#[from] VectorDatabaseError),
+    /// A row isn't a valid Qdrant payload (it must be a JSON object).
+    #[error("building a Qdrant payload: {0}")]
+    Payload(Box<QdrantError>),
+    /// The table name given to a PostgreSQL sink isn't a plain identifier.
+    #[cfg(feature = "postgres")]
+    #[error("invalid table name {0:?}: expected [A-Za-z_][A-Za-z0-9_]*")]
+    InvalidTable(String),
+    /// A PostgreSQL call failed.
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL sink, {context}: {source}")]
+    Postgres {
+        /// What was being done.
+        context: &'static str,
+        /// The driver's error.
+        #[source]
+        source: tokio_postgres::Error,
+    },
+    /// An error from a sink implemented outside lvv.
+    #[error(transparent)]
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
 
 /// Everything a [`Sink`] needs to persist one job's output.
 pub struct SinkContext<'a> {
@@ -35,7 +65,10 @@ pub trait Sink: Send + Sync + std::fmt::Debug {
     /// Short name, used in progress output and partial-failure reports.
     fn name(&self) -> &str;
     /// Persist `ctx` to this destination.
-    async fn write(&self, ctx: &SinkContext<'_>) -> anyhow::Result<()>;
+    ///
+    /// Sinks implemented outside lvv report their own errors with
+    /// [`SinkError::Other`].
+    async fn write(&self, ctx: &SinkContext<'_>) -> Result<(), SinkError>;
 }
 
 /// Writes vectors to Qdrant.
@@ -74,15 +107,12 @@ impl Sink for QdrantSink {
         "qdrant"
     }
 
-    async fn write(&self, ctx: &SinkContext<'_>) -> anyhow::Result<()> {
-        let db = QdrantDatabase::new_with_database_params(self.params.clone())
-            .connect()
-            .context("connecting to Qdrant")?;
+    async fn write(&self, ctx: &SinkContext<'_>) -> Result<(), SinkError> {
+        let db = QdrantDatabase::new_with_database_params(self.params.clone()).connect()?;
         if let QdrantDatabase::Connected(db) = db {
             if db
                 .collection_exists_and_is_not_empty(ctx.collection_name, ctx.extends)
-                .await
-                .map_err(|e| anyhow::anyhow!("Qdrant collection check failed: {e}"))?
+                .await?
             {
                 // Already populated and not extending: leave it untouched.
                 return Ok(());
@@ -90,16 +120,15 @@ impl Sink for QdrantSink {
             let payloads = ctx
                 .rows
                 .iter()
-                .map(|v| Payload::try_from(v.clone()).context("building Qdrant payload"))
-                .collect::<anyhow::Result<Vec<_>>>()?;
+                .map(|v| Payload::try_from(v.clone()).map_err(|e| SinkError::Payload(Box::new(e))))
+                .collect::<Result<Vec<_>, _>>()?;
             db.upload_embedddings(
                 ctx.collection_name,
                 ctx.dims,
                 ctx.embeddings.to_vec(),
                 payloads,
             )
-            .await
-            .map_err(|e| anyhow::anyhow!("Qdrant upload failed: {e}"))?;
+            .await?;
         }
         Ok(())
     }
@@ -136,10 +165,13 @@ mod postgres_sink {
         /// # Errors
         ///
         /// Returns an error when the table name is not a valid identifier.
-        pub fn new(conn_str: impl Into<String>, table: impl Into<String>) -> anyhow::Result<Self> {
+        pub fn new(
+            conn_str: impl Into<String>,
+            table: impl Into<String>,
+        ) -> Result<Self, SinkError> {
             let table = table.into();
             if !is_valid_ident(&table) {
-                anyhow::bail!("invalid table name {table:?}: expected [A-Za-z_][A-Za-z0-9_]*");
+                return Err(SinkError::InvalidTable(table));
             }
             Ok(Self {
                 conn_str: conn_str.into(),
@@ -168,10 +200,12 @@ mod postgres_sink {
             "postgres"
         }
 
-        async fn write(&self, ctx: &SinkContext<'_>) -> anyhow::Result<()> {
+        async fn write(&self, ctx: &SinkContext<'_>) -> Result<(), SinkError> {
+            let postgres =
+                |context: &'static str| move |source| SinkError::Postgres { context, source };
             let (client, connection) = tokio_postgres::connect(&self.conn_str, NoTls)
                 .await
-                .context("connecting to PostgreSQL sink")?;
+                .map_err(postgres("connecting"))?;
             let handle = tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     eprintln!("postgres sink connection error: {e}");
@@ -191,7 +225,9 @@ mod postgres_sink {
             &self,
             client: &tokio_postgres::Client,
             ctx: &SinkContext<'_>,
-        ) -> anyhow::Result<()> {
+        ) -> Result<(), SinkError> {
+            let postgres =
+                |context: &'static str| move |source| SinkError::Postgres { context, source };
             let create = format!(
                 "CREATE TABLE IF NOT EXISTS {} \
                  (id text PRIMARY KEY, collection text NOT NULL, payload jsonb NOT NULL)",
@@ -200,7 +236,7 @@ mod postgres_sink {
             client
                 .batch_execute(&create)
                 .await
-                .context("ensuring sink table exists")?;
+                .map_err(postgres("ensuring the sink table exists"))?;
 
             let upsert = format!(
                 "INSERT INTO {} (id, collection, payload) VALUES ($1, $2, $3) \
@@ -208,14 +244,17 @@ mod postgres_sink {
                  payload = EXCLUDED.payload",
                 self.table
             );
-            let stmt = client.prepare(&upsert).await.context("preparing upsert")?;
+            let stmt = client
+                .prepare(&upsert)
+                .await
+                .map_err(postgres("preparing the upsert"))?;
             let collection = ctx.collection_name;
             for row in ctx.rows {
                 let id = stable_id(row);
                 client
                     .execute(&stmt, &[&id, &collection, row])
                     .await
-                    .context("upserting row into sink table")?;
+                    .map_err(postgres("upserting a row"))?;
             }
             Ok(())
         }

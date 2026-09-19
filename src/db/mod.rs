@@ -6,7 +6,7 @@ pub mod sink;
 pub mod vector_database;
 /// Qdrant vector-distance metric.
 pub use qdrant_client::qdrant::Distance;
-pub use sink::{QdrantSink, Sink, SinkContext};
+pub use sink::{QdrantSink, Sink, SinkContext, SinkError};
 pub use vector_database::QdrantDatabase;
 
 #[cfg(feature = "postgres")]

@@ -37,9 +37,7 @@ use lvv::{
     inference::EmbeddingProvider,
     intake::{FileSource, Source, dataset::DataSet},
     jobs::{JobBuilder, Provider, job_queue::JobQueue},
-    transform::transform::{
-        IntoDescriptionValue, VectorDatabase, VectorDatabaseItem, VectorPointDraft,
-    },
+    points::{IntoDescriptionValue, VectorDatabase, VectorDatabaseItem, VectorPointDraft},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -190,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Cache::new()
     };
-    let embedder = EmbeddingProvider::new(&args.model)?;
+    let embedder = EmbeddingProvider::new(&args.model);
 
     let mut jobs = Vec::new();
     for (category, drafts) in &by_category {
@@ -198,8 +196,7 @@ async fn main() -> anyhow::Result<()> {
         let embeddings = match cache.get_embedding(args.model.clone(), descriptions.clone()) {
             Some(cached) => cached.clone(),
             None => {
-                let dataset = DataSet::new("portfolio", category.as_str(), descriptions.clone());
-                let fresh = embedder.embed_properties(dataset).await?;
+                let fresh = embedder.embed_texts(&descriptions).await?;
                 cache.add_embedding(args.model.clone(), descriptions, fresh.clone());
                 fresh
             }
@@ -248,7 +245,7 @@ async fn main() -> anyhow::Result<()> {
         Distance::Cosine,
         dims,
     ));
-    queue.run().await
+    Ok(queue.run().await?)
 }
 
 /// Reads every row of `examples/data/<file>` with a `FileSource`, which picks

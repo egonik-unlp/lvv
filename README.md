@@ -2,7 +2,7 @@
 
 `lvv` is a Rust library for turning structured datasets into vector embeddings
 and loading them into one or more storage backends. It supports Ollama and
-OpenAI models, reusable embedding caches, sequential job queues, Qdrant, flat
+OpenAI-compatible models, reusable embedding caches, sequential job queues, Qdrant, flat
 files, optional SQL, HTTP and PostgreSQL connectors, and derive macros that let
 your own Rust types describe what gets embedded and what gets stored. Records
 can also be transformed by an LLM, for example summarized, before they are
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let mut queue = JobQueue::from_vec(vec![job]);
     queue.with_sink(Arc::new(QdrantSink::new(params)));
-    queue.run().await
+    Ok(queue.run().await?)
 }
 ```
 
@@ -65,16 +65,16 @@ async fn main() -> anyhow::Result<()> {
 The `derive` feature adds `#[derive(VectorDatabaseItem)]` and
 `#[derive(VectorDatabase)]` from
 [`lvv-macros`](https://crates.io/crates/lvv-macros). They are re-exported in
-`lvv::transform::transform`, next to the traits they implement.
+`lvv::points`, next to the traits they implement.
 
 ```toml
 [dependencies]
-lvv = { version = "0.5", features = ["derive"] }
+lvv = { version = "0.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 ```
 
 ```rust,ignore
-use lvv::transform::transform::{VectorDatabase, VectorDatabaseItem};
+use lvv::points::{VectorDatabase, VectorDatabaseItem};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, VectorDatabaseItem)]
@@ -112,8 +112,10 @@ Each item becomes a `VectorPointDraft`:
 `BTreeMap<K, T>` or `HashMap<K, T>`, each optionally wrapped in `Option`. See the
 [`lvv-macros` documentation](https://docs.rs/lvv-macros) for every attribute,
 and the
-[`transform::transform` module](https://docs.rs/lvv/latest/lvv/transform/transform/)
-for embedding and storing drafts.
+[`points` module](https://docs.rs/lvv/latest/lvv/points/)
+for embedding and storing drafts. Embed descriptions with
+`EmbeddingProvider::embed_texts`, which sends the text as is;
+`embed_properties` embeds each record's JSON instead.
 
 [`examples/derive.rs`](https://github.com/egonik-unlp/lvv/blob/main/examples/derive.rs)
 is a complete lvv pipeline over derived structs. It reads records from JSON
@@ -129,27 +131,28 @@ cargo run --example derive --features derive -- --embed --qdrant http://localhos
 
 ## Transforming records with LLMs
 
-`inference::CompletionModel` sends records to an Ollama or OpenAI chat model
-before they are embedded, to summarize long text, extract keywords, translate,
-or clean up inconsistent fields. The prompt you give it is the system prompt,
-and each record is sent as JSON in its own chat.
+`lvv::transform` rewrites records with a chat model before they are embedded:
+to summarize long text, extract keywords, translate, or clean up inconsistent
+fields.
 
-1. Create a `CompletionModel` with a model name and your instructions.
-2. Run it over the records:
-   - `perform_completion` returns the response texts, in record order.
-   - `perform_completion_dump_inelegant` stores each response in its record
-     through `FieldEnhanceable`, and saves the updated records to a JSON file
-     as it goes.
-3. Embed the result: build a `DataSet` from the updated records or, with the
-   `derive` feature, mark the field that holds the response
-   `#[lvv(description)]`.
+- An `Llm` says where the model is: `Llm::ollama`, `Llm::openai`, or
+  `Llm::openai_compatible` for vLLM, LM Studio, llama.cpp's server, OpenRouter
+  and the like.
+- A `Transform` says what to do: the system prompt, what to send for each
+  record (its JSON by default, or `.input(...)`), and where the reply goes
+  (`.apply(...)`). `Transform::text` takes the reply as text;
+  `Transform::structured` sends the JSON schema of a type and parses the reply
+  into it. A record type can have any number of transforms.
+- `llm.run(&transform, &mut records)` applies the outputs in place and returns
+  a `Report`. `llm.complete(&transform, &records)` returns the outputs instead.
 
 ```rust,ignore
-use lvv::inference::{CompletionModel, completion_model::FieldEnhanceable};
-use lvv::transform::transform::VectorDatabaseItem;
+use lvv::points::VectorDatabaseItem;
+use lvv::transform::{Llm, Transform};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize, VectorDatabaseItem)]
+#[derive(Serialize, Deserialize, VectorDatabaseItem)]
 struct Article {
     #[lvv(description)]
     title: String,
@@ -157,48 +160,63 @@ struct Article {
     // Filled in by the model, then embedded with the title.
     #[lvv(description)]
     summary: Option<String>,
+    keywords: Vec<String>,
 }
 
-impl FieldEnhanceable for Article {
-    fn set_field(&mut self, response: String) {
-        self.summary = Some(response);
-    }
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Tags {
+    keywords: Vec<String>,
 }
 
-let model = CompletionModel::new(
-    "llama3.2",
-    "Summarize the article in one sentence. Reply with the sentence only.",
-)?;
-model
-    .perform_completion_dump_inelegant(articles, "articles.json".into())
+let llm = Llm::ollama("llama3.2");
+
+let summarize = Transform::text("Summarize the article in one sentence.")
+    .input(|a: &Article| a.body.clone())
+    .apply(|a: &mut Article, summary| a.summary = Some(summary));
+let tag = Transform::structured("List search keywords for the article.")
+    .apply(|a: &mut Article, tags: Tags| a.keywords = tags.keywords);
+
+let report = llm
+    .run(&summarize, &mut articles)
+    .concurrency(4)
+    .cache("summaries.jsonl")
     .await?;
+for (index, error) in report.failures() {
+    eprintln!("article {index}: {error}");
+}
+llm.run(&tag, &mut articles).await?.ensure_all()?;
 
-let summarized: Vec<Article> =
-    serde_json::from_str(&std::fs::read_to_string("articles.json")?)?;
-let drafts = summarized
+let drafts = articles
     .iter()
     .map(Article::try_into_database_item)
-    .collect::<anyhow::Result<Vec<_>>>()?;
+    .collect::<Result<Vec<_>, _>>()?;
 // drafts[0].description is "<title>\n<summary>".
 ```
 
 Things to know:
 
-- Records are sent one at a time.
-- Records that fail are left out of the results instead of returning an error;
-  a wrong model name returns no responses at all. Compare the number of
-  responses with the number of records before pairing them.
-- `perform_completion_dump_inelegant` returns only the response texts. Read the
-  updated records from its file.
-- A failed chat is skipped, but a failed write to that file is not: it stops the
-  run and returns the error, dropping the responses collected so far. The file
-  keeps whatever was written before the failure.
-- Every chat also contains two fixed messages that introduce the record as
-  input for summarization, whatever your prompt asks for.
-- `perform_completion_and_live_dump` is unfinished and panics.
+- Every record gets an outcome, in record order. A record whose request fails
+  is left unchanged and listed in `report.failures()`; the others are not
+  affected.
+- Rate limits, server errors and timeouts are retried (`.retries(n)`, 2 by
+  default, with exponential backoff). Authentication errors and unknown models
+  are not.
+- If the first requests of a run all fail with such fatal errors, the run
+  stops with an error instead of failing every record
+  (`.circuit_breaker(n)`, 3 by default).
+- A reply that is empty or doesn't parse fails only its record.
+- Requests go one at a time unless you set `.concurrency(n)`.
+- With `.cache(path)`, completed outputs are appended to a JSON Lines file and
+  reused. An output is reused only for the same backend, model, prompt, schema
+  and input, so an interrupted run resumes where it stopped and a changed
+  prompt runs again.
+- The only prompt sent is yours. The library prints nothing: follow progress
+  with `.on_progress(...)` or `tracing`.
+- If a run stops early, records completed before that keep their outputs, and
+  the error says how many there were.
 
 See the
-[`CompletionModel` documentation](https://docs.rs/lvv/latest/lvv/inference/completion_model/struct.CompletionModel.html)
+[`transform` documentation](https://docs.rs/lvv/latest/lvv/transform/)
 for details.
 
 ## Cargo features
@@ -214,7 +232,7 @@ No features are enabled by default.
 
 ```toml
 [dependencies]
-lvv = { version = "0.5", features = ["derive", "postgres"] }
+lvv = { version = "0.6", features = ["derive", "postgres"] }
 ```
 
 ## Configuration
@@ -222,11 +240,9 @@ lvv = { version = "0.5", features = ["derive", "postgres"] }
 - `OLLAMA_URL` selects the Ollama endpoint. It defaults to
   `http://127.0.0.1:11434`.
 - `OPENAI_API_KEY` authenticates OpenAI requests, for both completions and
-  embeddings.
-- `QDRANT_API_KEY` authenticates remote Qdrant requests.
-
-lvv loads a `.env` file before reading `OPENAI_API_KEY` or `QDRANT_API_KEY`,
-and fails if there isn't one.
+  embeddings. When it isn't set, lvv looks for it in a `.env` file.
+- `QDRANT_API_KEY` authenticates remote Qdrant requests. lvv loads a `.env`
+  file before reading it, and fails if there isn't one.
 
 See the [API documentation](https://docs.rs/lvv) for detailed descriptions and
 examples for each public API.
@@ -238,11 +254,12 @@ puts every stage together, with the `derive` feature:
 
 1. `FileSource` loads positions, skills and projects from JSON Lines, CSV and
    JSON files into structs that derive `VectorDatabaseItem`.
-2. `CompletionModel` writes a summary into each position, in a field marked
-   `#[lvv(description)]`.
+2. A `Transform` run by an `Llm` writes a summary into each position, in a
+   field marked `#[lvv(description)]`. Summaries are cached, so a rerun only
+   sends the positions that don't have one yet.
 3. `#[derive(VectorDatabase)]` turns the records into points.
-4. `EmbeddingProvider` embeds each category's descriptions, reusing vectors
-   from a `Cache`.
+4. `EmbeddingProvider::embed_texts` embeds each category's descriptions,
+   reusing vectors from a `Cache`.
 5. Each category becomes a `Job` with precomputed embeddings, because a
    `JobQueue` would otherwise embed each row's JSON instead of its description.
 6. A `JobQueue` writes the jobs to Qdrant, one collection per category.
@@ -258,7 +275,7 @@ cargo run --example full_pipeline --features derive
 QDRANT_URL=http://localhost:6334 cargo run --example full_pipeline --features derive
 ```
 
-```rust
+```rust,ignore
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Context;
@@ -268,10 +285,11 @@ use lvv::{
         Distance,
         vector_database::{DatabaseParams, Location},
     },
-    inference::{CompletionModel, EmbeddingProvider},
+    inference::EmbeddingProvider,
     intake::{FileSource, Source, dataset::DataSet},
     jobs::{JobBuilder, Provider, job_queue::JobQueue},
-    transform::transform::{VectorDatabase, VectorDatabaseItem, VectorPointDraft},
+    points::{VectorDatabase, VectorDatabaseItem, VectorPointDraft},
+    transform::{Llm, Transform},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -337,28 +355,34 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 2. Transform: the LLM writes a one-sentence summary of each position.
-    let model = CompletionModel::new(
-        chat_model.as_str(),
-        "You write search summaries of job positions. The last user message is one \
-         job position as JSON. Reply with a single sentence of at most 25 words that \
+    //    Each position is sent as JSON, and the reply goes into `summary`.
+    let summarize = Transform::text(
+        "You write search summaries of job positions. The user message is one job \
+         position as JSON. Reply with a single sentence of at most 25 words that \
          describes the role, the organization and what the person did. Do not add \
          quotes, greetings or any other text.",
-    )?;
-    let summaries = model
-        .perform_completion(portfolio.positions.iter().collect::<Vec<_>>())
-        .await?;
-    // Failed records are left out of the responses, so pairing responses with
-    // records is only safe when every record got one.
-    anyhow::ensure!(
-        summaries.len() == portfolio.positions.len(),
-        "{} of {} summaries failed; check that `{chat_model}` is a chat model \
-         available in Ollama",
-        portfolio.positions.len() - summaries.len(),
-        portfolio.positions.len()
+    )
+    // Small models sometimes wrap the sentence in quotes anyway.
+    .apply(|position: &mut Position, summary| {
+        position.summary = Some(summary.trim_matches('"').to_string())
+    });
+    let summary_cache = std::env::temp_dir().join("lvv-full-pipeline-summaries.jsonl");
+    let report = Llm::ollama(&chat_model)
+        .run(&summarize, &mut portfolio.positions)
+        .concurrency(2)
+        .cache(summary_cache)
+        .on_progress(|p| eprint!("\rsummaries: {}/{}", p.done, p.total))
+        .await
+        .with_context(|| format!("check that `{chat_model}` is a chat model available in Ollama"))?;
+    eprintln!();
+    let counts = report.counts();
+    println!(
+        "{} summaries written, {} reused from the cache, {} failed",
+        counts.applied, counts.cached, counts.failed
     );
-    for (position, summary) in portfolio.positions.iter_mut().zip(summaries) {
-        // Small models sometimes wrap the sentence in quotes anyway.
-        position.summary = Some(summary.trim().trim_matches('"').to_string());
+    // A position without a summary is still embedded, by its title alone.
+    for (index, error) in report.failures() {
+        eprintln!("position {index}: {error}");
     }
 
     // 3. Derive: one point per record, grouped by category.
@@ -378,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Cache::new()
     };
-    let embedder = EmbeddingProvider::new(&embedding_model)?;
+    let embedder = EmbeddingProvider::new(&embedding_model);
 
     let mut jobs = Vec::new();
     for (category, drafts) in &by_category {
@@ -386,8 +410,7 @@ async fn main() -> anyhow::Result<()> {
         let embeddings = match cache.get_embedding(embedding_model.clone(), descriptions.clone()) {
             Some(cached) => cached.clone(),
             None => {
-                let dataset = DataSet::new("portfolio", category.as_str(), descriptions.clone());
-                let fresh = embedder.embed_properties(dataset).await?;
+                let fresh = embedder.embed_texts(&descriptions).await?;
                 cache.add_embedding(embedding_model.clone(), descriptions, fresh.clone());
                 fresh
             }
@@ -438,7 +461,7 @@ async fn main() -> anyhow::Result<()> {
         Distance::Cosine,
         dims,
     ));
-    queue.run().await
+    Ok(queue.run().await?)
 }
 
 /// Reads every row of `examples/data/<file>` with a `FileSource`, which picks
@@ -460,6 +483,29 @@ fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 ```
+
+## Migrating from 0.5
+
+- `lvv::transform::transform` is now `lvv::points`. `lvv::transform` is the
+  new LLM API, and `lvv-macros` 0.2 is required for the derives.
+- `CompletionModel`, `FieldEnhanceable` and the `perform_completion*` methods
+  are gone. Use `Llm` and `Transform`; see
+  [Transforming records with LLMs](#transforming-records-with-llms).
+- `EmbeddingProvider::new` no longer returns a `Result`, and `new_openai` is
+  now `openai`. To embed text such as `VectorPointDraft` descriptions, use
+  `embed_texts`. `embed_properties` serializes each item as JSON, so in 0.5 a
+  `DataSet<String>` of descriptions was embedded with quotes and escapes
+  around the text.
+- Vectors created from descriptions with 0.5 were computed on that quoted
+  text. Re-index those Qdrant collections so stored vectors match the ones
+  your queries produce. Embedding cache files from 0.5 load as empty caches.
+- Errors are typed (`thiserror`) instead of `anyhow`: `IntakeError`,
+  `EmbedError`, `SinkError`, `JobError`, `PointError`, `CacheError`,
+  `BackendError`, `RunError`. They all implement `std::error::Error`, so `?`
+  into `anyhow::Result` keeps working. Custom sinks return
+  `SinkError::Other`.
+- The `llm` crate is no longer a dependency. Models are reached through
+  `lvv::backend`, which you can implement for other providers.
 
 ## License
 

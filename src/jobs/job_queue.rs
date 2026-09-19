@@ -1,7 +1,5 @@
-// TODO: reemplazar anyhow con thiserror
 use std::sync::Arc;
 
-use anyhow::Context;
 use indicatif::ProgressIterator;
 use serde::Serialize;
 
@@ -13,7 +11,7 @@ use crate::{
         vector_database::DatabaseParams,
     },
     inference::embedding_model::EmbeddingProvider, // Needed for `run()` when creating embedders
-    jobs::{Provider, job::Job},
+    jobs::{JobError, Provider, job::Job},
 };
 
 #[derive(Debug, Clone)]
@@ -113,35 +111,32 @@ where
     ///
     /// Processing stops at the first sink failure and the error reports which
     /// earlier sinks completed.
-    pub async fn run(&mut self) -> anyhow::Result<()> {
+    pub async fn run(&mut self) -> Result<(), JobError> {
         // Use each job inside the loop; previous code referenced `job` before it existed.
         for job in self.clone().queue.into_iter().progress() {
             println!("Job begun: {:#?}", job.collection_name);
             let embedder = match job.provider.clone() {
-                Provider::Ollama(ollama_model) => EmbeddingProvider::new(&ollama_model)
-                    .expect("Couldn't create embedding provider"),
-                Provider::OpenAI(openai_model) => {
-                    EmbeddingProvider::new_openai(&openai_model).expect("Couldnt create embedder")
-                }
+                Provider::Ollama(ollama_model) => EmbeddingProvider::new(&ollama_model),
+                Provider::OpenAI(openai_model) => EmbeddingProvider::openai(&openai_model)?,
             };
             let embeddings = match job.embedding.clone() {
-                Some(embeddings) => anyhow::Ok(embeddings),
+                Some(embeddings) => embeddings,
                 None => {
                     let temp = embedder
                         .embed_properties(job.dataset.clone())
                         .await
-                        .context("Embedding failed")?;
+                        .map_err(|source| JobError::Embed {
+                            collection: job.collection_name.clone(),
+                            source,
+                        })?;
                     if let Some(mut cache) = self.cache.clone() {
                         let inner = &job.dataset;
-                        let data = inner
-                            .to_owned()
-                            .serialize_to_vec()
-                            .context("Could not serialize")?;
+                        let data = inner.to_owned().serialize_to_vec()?;
                         cache.add_embedding(job.get_model(), data, temp.clone());
                     }
-                    Ok(temp)
+                    temp
                 }
-            }?;
+            };
             // Raw JSON rows, one per embedding; each sink derives its own
             // representation from these (Qdrant -> Payload, Postgres -> jsonb).
             let rows = job.get_payload_values()?;
@@ -172,17 +167,12 @@ where
             // populated collection when `extends` is false) and reconciles.
             let mut written: Vec<String> = Vec::new();
             for sink in &sinks {
-                if let Err(e) = sink.write(&ctx).await {
-                    return Err(e).with_context(|| {
-                        format!(
-                            "sink '{}' failed for collection '{}'. Written: [{}]; \
-                             not written: '{}' and any sink after it. Re-run to reconcile \
-                             (writes are idempotent).",
-                            sink.name(),
-                            job.collection_name,
-                            written.join(", "),
-                            sink.name(),
-                        )
+                if let Err(source) = sink.write(&ctx).await {
+                    return Err(JobError::Sink {
+                        sink: sink.name().to_string(),
+                        collection: job.collection_name.clone(),
+                        written,
+                        source,
                     });
                 }
                 written.push(sink.name().to_string());

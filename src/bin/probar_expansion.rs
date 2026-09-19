@@ -1,5 +1,4 @@
-// use lvv_core::{VectorDatabase, VectorDatabaseItem};
-use lvv::transform::transform::{VectorDatabase, VectorDatabaseItem};
+use lvv::points::{VectorDatabase, VectorDatabaseItem};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]

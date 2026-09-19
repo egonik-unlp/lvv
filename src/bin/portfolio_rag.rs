@@ -26,10 +26,7 @@ use lvv::{
         vector_database::{DatabaseParams, Location},
     },
     inference::EmbeddingProvider,
-    intake::dataset::DataSet,
-    transform::transform::{
-        IntoDescriptionValue, VectorDatabase, VectorDatabaseItem, VectorPointDraft,
-    },
+    points::{IntoDescriptionValue, VectorDatabase, VectorDatabaseItem, VectorPointDraft},
 };
 use serde::{Deserialize, Serialize};
 
@@ -209,7 +206,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let portfolio = match &args.input {
@@ -252,12 +249,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 5. Embed descriptions, store payloads.
-    let embedder = EmbeddingProvider::new(&args.model)?;
+    let embedder = EmbeddingProvider::new(&args.model);
     for (category, drafts) in by_category {
-        let descriptions: Vec<String> = drafts.iter().map(|d| d.description.clone()).collect();
-        let embeddings = embedder
-            .embed_properties(DataSet::new("portfolio", category.as_str(), descriptions))
-            .await?;
+        let descriptions: Vec<&str> = drafts.iter().map(|d| d.description.as_str()).collect();
+        let embeddings = embedder.embed_texts(&descriptions).await?;
         let dims = embeddings.first().map_or(0, Vec::len) as u64;
         println!(
             "\nembedded {} `{category}` descriptions ({dims} dims)",
@@ -293,7 +288,9 @@ async fn main() -> anyhow::Result<()> {
 
 /// Checks the invariants the attributes promise. Reports every problem instead
 /// of stopping at the first one.
-fn preflight(by_category: &BTreeMap<String, Vec<VectorPointDraft>>) -> anyhow::Result<()> {
+fn preflight(
+    by_category: &BTreeMap<String, Vec<VectorPointDraft>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut problems = Vec::new();
     let payload_of = |category: &str| -> Option<serde_json::Value> {
         by_category
