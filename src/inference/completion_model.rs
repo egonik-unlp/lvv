@@ -13,7 +13,7 @@ use llm::{
     chat::ChatMessage,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinHandle};
 
 /// A chat model that transforms records before they are embedded: summaries,
 /// keywords, translations, or any other text you can ask an LLM for.
@@ -413,13 +413,14 @@ impl CompletionModel {
         // TODO: Eventualmente reemplazar con tracing / tracing_subscriber
         let (emiter, mut receiver) = mpsc::channel::<Vec<T>>(4);
 
-        let handle = tokio::spawn(async move {
+        let handle: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             while let Some(msg) = receiver.recv().await {
                 dump_on_each_iteration(&msg, filename.clone())
                     .await
-                    .context("Could not dump")
-                    .unwrap();
+                    .context("Could not dump")?;
             }
+
+            Ok(())
         });
         println!("Running completion");
         let mut generated_articles = vec![];
@@ -480,7 +481,7 @@ impl CompletionModel {
             "Returning from completion function. Failed chunk ids:\n{:#?}",
             failed_ids
         );
-        handle.await.unwrap();
+        handle.await??;
         Ok(generated_articles)
     }
 }
