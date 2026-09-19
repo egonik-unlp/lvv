@@ -190,6 +190,9 @@ Things to know:
   responses with the number of records before pairing them.
 - `perform_completion_dump_inelegant` returns only the response texts. Read the
   updated records from its file.
+- A failed chat is skipped, but a failed write to that file is not: it stops the
+  run and returns the error, dropping the responses collected so far. The file
+  keeps whatever was written before the failure.
 - Every chat also contains two fixed messages that introduce the record as
   input for summarization, whatever your prompt asks for.
 - `perform_completion_and_live_dump` is unfinished and panics.

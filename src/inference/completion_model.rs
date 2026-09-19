@@ -396,12 +396,12 @@ impl CompletionModel {
     ///
     /// # Errors
     ///
-    /// Returns an error if a record can't be serialized as JSON.
-    ///
-    /// # Panics
-    ///
-    /// If `filename` can't be written, this method panics or returns an error,
-    /// depending on when the write fails.
+    /// Returns an error if a record can't be serialized as JSON, or if
+    /// `filename` can't be written. Writing runs in a background task, so a
+    /// failed write stops the run on the next record; if it fails on the last
+    /// one, the error surfaces when the method returns. Either way the
+    /// responses collected so far are dropped with the error, while `filename`
+    /// keeps whatever was written before the failure.
     pub async fn perform_completion_dump_inelegant<T>(
         &self,
         dataset: Vec<T>,
