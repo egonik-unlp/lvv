@@ -7,8 +7,7 @@
 //! because SQL/HTTP/file origins don't know their schema at compile time; a
 //! caller with a strongly-typed row can still build `DataSet<MyType>` by hand.
 
-use crate::intake::dataset::DataSet;
-use anyhow::Context;
+use crate::intake::{IntakeError, dataset::DataSet};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -21,7 +20,7 @@ use std::path::{Path, PathBuf};
 #[async_trait]
 pub trait Source: Send + Sync {
     /// Read the whole origin, returning one [`DataSet`] per batch.
-    async fn fetch(&self) -> anyhow::Result<Vec<DataSet<Value>>>;
+    async fn fetch(&self) -> Result<Vec<DataSet<Value>>, IntakeError>;
 }
 
 /// Chunk rows into `DataSet`s: one per `batch_size` rows (0 = a single set).
@@ -52,20 +51,16 @@ pub enum FileFormat {
 }
 
 impl FileFormat {
-    fn from_path(path: &Path) -> anyhow::Result<Self> {
-        match path
+    fn from_path(path: &Path) -> Result<Self, IntakeError> {
+        let extension = path
             .extension()
             .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
+            .map(str::to_ascii_lowercase);
+        match extension.as_deref() {
             Some("csv") => Ok(FileFormat::Csv),
             Some("json") => Ok(FileFormat::Json),
             Some("jsonl") | Some("ndjson") => Ok(FileFormat::Jsonl),
-            other => anyhow::bail!(
-                "cannot infer file format from extension {other:?}; \
-                 set it explicitly with FileSource::with_format"
-            ),
+            _ => Err(IntakeError::UnknownFormat { extension }),
         }
     }
 }
@@ -89,7 +84,7 @@ impl FileSource {
     ///
     /// ```no_run
     /// use lvv::intake::source::{FileSource, Source};
-    /// # async fn example() -> anyhow::Result<()> {
+    /// # async fn example() -> Result<(), lvv::intake::IntakeError> {
     /// let batches = FileSource::new("records.jsonl", "records")?
     ///     .with_batch_size(500)
     ///     .fetch()
@@ -97,7 +92,10 @@ impl FileSource {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(path: impl Into<PathBuf>, identifier: impl Into<String>) -> anyhow::Result<Self> {
+    pub fn new(
+        path: impl Into<PathBuf>,
+        identifier: impl Into<String>,
+    ) -> Result<Self, IntakeError> {
         let path = path.into();
         let format = FileFormat::from_path(&path)?;
         Ok(Self {
@@ -120,20 +118,29 @@ impl FileSource {
         self
     }
 
-    fn read_rows(&self) -> anyhow::Result<Vec<Value>> {
+    fn read_rows(&self) -> Result<Vec<Value>, IntakeError> {
+        let path = &self.path;
+        let read = || {
+            std::fs::read_to_string(path).map_err(|source| IntakeError::Io {
+                path: path.clone(),
+                source,
+            })
+        };
         match self.format {
             FileFormat::Csv => {
-                let mut reader = csv::Reader::from_path(&self.path)
-                    .with_context(|| format!("opening CSV {}", self.path.display()))?;
+                let csv_error = |record, source| IntakeError::Csv {
+                    path: path.clone(),
+                    record,
+                    source,
+                };
+                let mut reader = csv::Reader::from_path(path).map_err(|e| csv_error(None, e))?;
                 let mut rows = Vec::new();
                 for (i, rec) in reader
                     .deserialize::<std::collections::BTreeMap<String, String>>()
                     .enumerate()
                 {
                     // Report the offending record instead of silently truncating.
-                    let rec = rec.with_context(|| {
-                        format!("parsing CSV record {} in {}", i + 1, self.path.display())
-                    })?;
+                    let rec = rec.map_err(|e| csv_error(Some(i + 1), e))?;
                     let map = rec
                         .into_iter()
                         .map(|(k, v)| (k, Value::String(v)))
@@ -143,26 +150,30 @@ impl FileSource {
                 Ok(rows)
             }
             FileFormat::Json => {
-                let text = std::fs::read_to_string(&self.path)
-                    .with_context(|| format!("reading {}", self.path.display()))?;
-                let value: Value = serde_json::from_str(&text)
-                    .with_context(|| format!("parsing JSON {}", self.path.display()))?;
+                let value: Value =
+                    serde_json::from_str(&read()?).map_err(|source| IntakeError::Json {
+                        path: path.clone(),
+                        line: None,
+                        source,
+                    })?;
                 match value {
                     Value::Array(items) => Ok(items),
                     other => Ok(vec![other]),
                 }
             }
             FileFormat::Jsonl => {
-                let text = std::fs::read_to_string(&self.path)
-                    .with_context(|| format!("reading {}", self.path.display()))?;
+                let text = read()?;
                 let mut rows = Vec::new();
                 for (i, line) in text.lines().enumerate() {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    let value: Value = serde_json::from_str(line).with_context(|| {
-                        format!("parsing JSONL line {} in {}", i + 1, self.path.display())
-                    })?;
+                    let value: Value =
+                        serde_json::from_str(line).map_err(|source| IntakeError::Json {
+                            path: path.clone(),
+                            line: Some(i + 1),
+                            source,
+                        })?;
                     rows.push(value);
                 }
                 Ok(rows)
@@ -173,7 +184,7 @@ impl FileSource {
 
 #[async_trait]
 impl Source for FileSource {
-    async fn fetch(&self) -> anyhow::Result<Vec<DataSet<Value>>> {
+    async fn fetch(&self) -> Result<Vec<DataSet<Value>>, IntakeError> {
         let rows = self.read_rows()?;
         let filename = self.path.to_string_lossy().into_owned();
         Ok(chunk_into_datasets(
@@ -233,20 +244,27 @@ mod postgres_source {
 
     #[async_trait]
     impl Source for PostgresSource {
-        async fn fetch(&self) -> anyhow::Result<Vec<DataSet<Value>>> {
+        async fn fetch(&self) -> Result<Vec<DataSet<Value>>, IntakeError> {
             let (client, connection) = tokio_postgres::connect(&self.conn_str, NoTls)
                 .await
-                .context("connecting to PostgreSQL source")?;
+                .map_err(|source| IntakeError::Postgres {
+                    context: "connecting",
+                    source,
+                })?;
             // Drive the connection on a task; it resolves once `client` drops.
             let handle = tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     eprintln!("postgres source connection error: {e}");
                 }
             });
-            let rows = client
-                .query(&self.query, &[])
-                .await
-                .context("running source query");
+            let rows =
+                client
+                    .query(&self.query, &[])
+                    .await
+                    .map_err(|source| IntakeError::Postgres {
+                        context: "running the source query",
+                        source,
+                    });
             drop(client);
             let _ = handle.await;
             let json_rows = rows?.iter().map(row_to_json).collect::<Vec<_>>();
@@ -380,14 +398,14 @@ mod sql_source {
             self
         }
 
-        async fn read_rows(&self) -> anyhow::Result<Vec<Value>> {
+        async fn read_rows(&self) -> Result<Vec<Value>, IntakeError> {
             match self.engine {
                 SqlEngine::Sqlite => {
                     // rusqlite is blocking; keep it off the async runtime.
                     let (target, query) = (self.target.clone(), self.query.clone());
                     tokio::task::spawn_blocking(move || read_sqlite(&target, &query))
                         .await
-                        .context("sqlite worker panicked")?
+                        .map_err(IntakeError::Worker)?
                 }
                 SqlEngine::MySql => read_mysql(&self.target, &self.query).await,
             }
@@ -396,7 +414,7 @@ mod sql_source {
 
     #[async_trait]
     impl Source for SqlSource {
-        async fn fetch(&self) -> anyhow::Result<Vec<DataSet<Value>>> {
+        async fn fetch(&self) -> Result<Vec<DataSet<Value>>, IntakeError> {
             let rows = self.read_rows().await?;
             Ok(chunk_into_datasets(
                 rows,
@@ -407,22 +425,25 @@ mod sql_source {
         }
     }
 
-    fn read_sqlite(path: &str, query: &str) -> anyhow::Result<Vec<Value>> {
+    fn read_sqlite(path: &str, query: &str) -> Result<Vec<Value>, IntakeError> {
         use rusqlite::types::ValueRef;
-        let conn = rusqlite::Connection::open(path)
-            .with_context(|| format!("opening SQLite {path}"))?;
-        let mut stmt = conn.prepare(query).context("preparing SQLite query")?;
+        let sqlite = |context: &str| {
+            let context = context.to_string();
+            move |source| IntakeError::Sqlite { context, source }
+        };
+        let conn = rusqlite::Connection::open(path).map_err(sqlite(&format!("opening {path}")))?;
+        let mut stmt = conn.prepare(query).map_err(sqlite("preparing the query"))?;
         let col_names: Vec<String> = stmt
             .column_names()
             .into_iter()
             .map(str::to_string)
             .collect();
-        let mut rows = stmt.query([]).context("running SQLite query")?;
+        let mut rows = stmt.query([]).map_err(sqlite("running the query"))?;
         let mut out = Vec::new();
-        while let Some(row) = rows.next().context("reading SQLite row")? {
+        while let Some(row) = rows.next().map_err(sqlite("reading a row"))? {
             let mut map = serde_json::Map::new();
             for (i, name) in col_names.iter().enumerate() {
-                let value = match row.get_ref(i).context("reading SQLite column")? {
+                let value = match row.get_ref(i).map_err(sqlite("reading a column"))? {
                     ValueRef::Null => Value::Null,
                     ValueRef::Integer(n) => serde_json::json!(n),
                     ValueRef::Real(f) => serde_json::json!(f),
@@ -436,11 +457,15 @@ mod sql_source {
         Ok(out)
     }
 
-    async fn read_mysql(url: &str, query: &str) -> anyhow::Result<Vec<Value>> {
+    async fn read_mysql(url: &str, query: &str) -> Result<Vec<Value>, IntakeError> {
         use mysql_async::{Value as MyVal, prelude::Queryable};
         let pool = mysql_async::Pool::new(url);
-        let mut conn = pool.get_conn().await.context("connecting to MySQL")?;
-        let rows: Vec<mysql_async::Row> = conn.query(query).await.context("running MySQL query")?;
+        let mysql = |context: &'static str| move |source| IntakeError::MySql { context, source };
+        let mut conn = pool.get_conn().await.map_err(mysql("connecting"))?;
+        let rows: Vec<mysql_async::Row> = conn
+            .query(query)
+            .await
+            .map_err(mysql("running the query"))?;
         drop(conn);
         pool.disconnect().await.ok();
 
@@ -455,7 +480,9 @@ mod sql_source {
                         Some(MyVal::UInt(n)) => serde_json::json!(n),
                         Some(MyVal::Float(f)) => serde_json::json!(f),
                         Some(MyVal::Double(f)) => serde_json::json!(f),
-                        Some(MyVal::Bytes(b)) => Value::String(String::from_utf8_lossy(b).into_owned()),
+                        Some(MyVal::Bytes(b)) => {
+                            Value::String(String::from_utf8_lossy(b).into_owned())
+                        }
                         // Date/Time — render as their debug string.
                         Some(other) => Value::String(format!("{other:?}")),
                     };
@@ -536,7 +563,7 @@ mod http_source {
 
     #[async_trait]
     impl Source for HttpSource {
-        async fn fetch(&self) -> anyhow::Result<Vec<DataSet<Value>>> {
+        async fn fetch(&self) -> Result<Vec<DataSet<Value>>, IntakeError> {
             let client = reqwest::Client::new();
             let mut all = Vec::new();
             match &self.pagination {
@@ -545,12 +572,11 @@ mod http_source {
                         .get(&self.url)
                         .send()
                         .await
-                        .context("HTTP request failed")?
-                        .error_for_status()
-                        .context("HTTP error status")?
+                        .and_then(reqwest::Response::error_for_status)
+                        .map_err(|source| http_error(&self.url, source))?
                         .json()
                         .await
-                        .context("decoding JSON response")?;
+                        .map_err(|source| http_error(&self.url, source))?;
                     all.extend(extract_items(&body, self.pointer.as_deref())?);
                 }
                 Pagination::PageParam { param, start } => {
@@ -562,12 +588,11 @@ mod http_source {
                             .get(&url)
                             .send()
                             .await
-                            .context("HTTP request failed")?
-                            .error_for_status()
-                            .context("HTTP error status")?
+                            .and_then(reqwest::Response::error_for_status)
+                            .map_err(|source| http_error(&url, source))?
                             .json()
                             .await
-                            .context("decoding JSON response")?;
+                            .map_err(|source| http_error(&url, source))?;
                         let items = extract_items(&body, self.pointer.as_deref())?;
                         if items.is_empty() {
                             break;
@@ -586,12 +611,24 @@ mod http_source {
         }
     }
 
+    fn http_error(url: &str, source: reqwest::Error) -> IntakeError {
+        IntakeError::Http {
+            url: url.to_string(),
+            source,
+        }
+    }
+
     /// Pure extraction of the items array from a response body (unit-tested).
-    pub(super) fn extract_items(body: &Value, pointer: Option<&str>) -> anyhow::Result<Vec<Value>> {
+    pub(super) fn extract_items(
+        body: &Value,
+        pointer: Option<&str>,
+    ) -> Result<Vec<Value>, IntakeError> {
         let target = match pointer {
             Some(p) => body
                 .pointer(p)
-                .with_context(|| format!("JSON pointer {p:?} not found in response"))?,
+                .ok_or_else(|| IntakeError::PointerNotFound {
+                    pointer: p.to_string(),
+                })?,
             None => body,
         };
         match target {
@@ -722,7 +759,7 @@ mod tests {
         let sets = FileSource::new(&path, "x")
             .or_else(|_| {
                 // build with an explicit format instead of inferring
-                Ok::<_, anyhow::Error>(FileSource {
+                Ok::<_, IntakeError>(FileSource {
                     path: path.clone(),
                     identifier: "x".into(),
                     format: FileFormat::Json,

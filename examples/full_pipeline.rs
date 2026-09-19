@@ -8,6 +8,9 @@
 //! endpoint to write the points; without it, the program stops after building
 //! the jobs.
 //!
+//! The summaries are cached in the system temp directory, so a second run, or
+//! a run you interrupted, only sends the positions that don't have one yet.
+//!
 //! ```text
 //! cargo run --example full_pipeline --features derive
 //! QDRANT_URL=http://localhost:6334 cargo run --example full_pipeline --features derive
@@ -22,10 +25,11 @@ use lvv::{
         Distance,
         vector_database::{DatabaseParams, Location},
     },
-    inference::{CompletionModel, EmbeddingProvider},
+    inference::EmbeddingProvider,
     intake::{FileSource, Source, dataset::DataSet},
     jobs::{JobBuilder, Provider, job_queue::JobQueue},
-    transform::transform::{VectorDatabase, VectorDatabaseItem, VectorPointDraft},
+    points::{VectorDatabase, VectorDatabaseItem, VectorPointDraft},
+    transform::{Llm, Transform},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -91,28 +95,36 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 2. Transform: the LLM writes a one-sentence summary of each position.
-    let model = CompletionModel::new(
-        chat_model.as_str(),
-        "You write search summaries of job positions. The last user message is one \
-         job position as JSON. Reply with a single sentence of at most 25 words that \
+    //    Each position is sent as JSON, and the reply goes into `summary`.
+    let summarize = Transform::text(
+        "You write search summaries of job positions. The user message is one job \
+         position as JSON. Reply with a single sentence of at most 25 words that \
          describes the role, the organization and what the person did. Do not add \
          quotes, greetings or any other text.",
-    )?;
-    let summaries = model
-        .perform_completion(portfolio.positions.iter().collect::<Vec<_>>())
-        .await?;
-    // Failed records are left out of the responses, so pairing responses with
-    // records is only safe when every record got one.
-    anyhow::ensure!(
-        summaries.len() == portfolio.positions.len(),
-        "{} of {} summaries failed; check that `{chat_model}` is a chat model \
-         available in Ollama",
-        portfolio.positions.len() - summaries.len(),
-        portfolio.positions.len()
+    )
+    // Small models sometimes wrap the sentence in quotes anyway.
+    .apply(|position: &mut Position, summary| {
+        position.summary = Some(summary.trim_matches('"').to_string())
+    });
+    let summary_cache = std::env::temp_dir().join("lvv-full-pipeline-summaries.jsonl");
+    let report = Llm::ollama(&chat_model)
+        .run(&summarize, &mut portfolio.positions)
+        .concurrency(2)
+        .cache(summary_cache)
+        .on_progress(|p| eprint!("\rsummaries: {}/{}", p.done, p.total))
+        .await
+        .with_context(|| {
+            format!("check that `{chat_model}` is a chat model available in Ollama")
+        })?;
+    eprintln!();
+    let counts = report.counts();
+    println!(
+        "{} summaries written, {} reused from the cache, {} failed",
+        counts.applied, counts.cached, counts.failed
     );
-    for (position, summary) in portfolio.positions.iter_mut().zip(summaries) {
-        // Small models sometimes wrap the sentence in quotes anyway.
-        position.summary = Some(summary.trim().trim_matches('"').to_string());
+    // A position without a summary is still embedded, by its title alone.
+    for (index, error) in report.failures() {
+        eprintln!("position {index}: {error}");
     }
 
     // 3. Derive: one point per record, grouped by category.
@@ -132,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Cache::new()
     };
-    let embedder = EmbeddingProvider::new(&embedding_model)?;
+    let embedder = EmbeddingProvider::new(&embedding_model);
 
     let mut jobs = Vec::new();
     for (category, drafts) in &by_category {
@@ -140,8 +152,7 @@ async fn main() -> anyhow::Result<()> {
         let embeddings = match cache.get_embedding(embedding_model.clone(), descriptions.clone()) {
             Some(cached) => cached.clone(),
             None => {
-                let dataset = DataSet::new("portfolio", category.as_str(), descriptions.clone());
-                let fresh = embedder.embed_properties(dataset).await?;
+                let fresh = embedder.embed_texts(&descriptions).await?;
                 cache.add_embedding(embedding_model.clone(), descriptions, fresh.clone());
                 fresh
             }
@@ -192,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
         Distance::Cosine,
         dims,
     ));
-    queue.run().await
+    Ok(queue.run().await?)
 }
 
 /// Reads every row of `examples/data/<file>` with a `FileSource`, which picks
