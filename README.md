@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/lvv-dark.png">
+  <img src="assets/lvv-light.png" alt="The lvv logotype: the letters l, v, v in memory cells, with vector arrows over the v's" width="280">
+</picture>
+
 # lvv
 
 `lvv` is a Rust library for turning structured datasets into vector embeddings

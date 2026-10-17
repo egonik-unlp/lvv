@@ -11,7 +11,7 @@ documentation = "https://docs.rs/lvv"
 readme = "README.md"
 keywords = ["embeddings", "llm", "qdrant", "ollama", "openai"]
 categories = ["database", "web-programming"]
-exclude = ["exp.rs"]
+exclude = ["exp.rs", "assets/"]
 
 [package.metadata.docs.rs]
 all-features = true
